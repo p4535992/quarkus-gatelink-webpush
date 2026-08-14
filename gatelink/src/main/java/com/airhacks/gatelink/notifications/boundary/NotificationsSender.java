@@ -1,4 +1,3 @@
-
 package com.airhacks.gatelink.notifications.boundary;
 
 import java.net.URI;
@@ -12,9 +11,6 @@ import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.NoSuchPaddingException;
 
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.eclipse.microprofile.metrics.MetricRegistry;
-import org.eclipse.microprofile.metrics.annotation.Counted;
-import org.eclipse.microprofile.metrics.annotation.RegistryType;
 import org.jose4j.lang.JoseException;
 
 import com.airhacks.gatelink.Boundary;
@@ -28,9 +24,11 @@ import com.airhacks.gatelink.notifications.control.PushServiceClient.Notificatio
 import com.airhacks.gatelink.signature.control.JsonWebSignature;
 import com.airhacks.gatelink.subscriptions.control.InMemorySubscriptionsStore;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.inject.Inject;
 
 /**
+ * Sends a message to every registered Web Push subscription.
  *
  * @author airhacks.com
  */
@@ -41,8 +39,7 @@ public class NotificationsSender {
     InMemorySubscriptionsStore store;
 
     @Inject
-    @RegistryType(type = MetricRegistry.Type.APPLICATION)
-    MetricRegistry registry;
+    MeterRegistry registry;
 
     @Inject
     InMemoryKeyStore keyStore;
@@ -53,24 +50,23 @@ public class NotificationsSender {
     @Inject
     Tracer tracer;
 
-
     /**
-     * server contact person, push service will use the contact, in the case of
-     * denial of service attacks etc.
+     * Server contact person. Push services can use this contact in case of
+     * abuse or denial-of-service incidents.
      */
     @Inject
     @ConfigProperty(name = "subject", defaultValue = "mailto:admin@airhacks.com")
     String subject;
 
-    @Counted(absolute = true, name = "forwardedMessages")
     public void send(String message) {
+        registry.counter("webpush.messages.forwarded").increment();
         tracer.log("Sending " + message);
         ECKeys serverKeys = this.keyStore.getKeys();
 
         this.store.all()
                 .stream()
-                .map(s -> new Notification(s, message))
-                .forEach(n -> this.send(n, serverKeys));
+                .map(subscription -> new Notification(subscription, message))
+                .forEach(notification -> this.send(notification, serverKeys));
     }
 
     public boolean send(Notification notification, ECKeys serverKeys) {
@@ -79,7 +75,7 @@ public class NotificationsSender {
             String endpoint = notification.getEndpoint();
             tracer.log("Sending to: " + endpoint);
             var notificationStatus = this.sendEncryptedMessage(serverKeys, endpoint, encryptedContent);
-            registry.counter("responses_" + notificationStatus.status()).inc();
+            registry.counter("webpush.responses", "status", Integer.toString(notificationStatus.status())).increment();
             return notificationStatus.isSuccessful();
         } catch (JoseException | NoSuchAlgorithmException | InvalidAlgorithmParameterException | NoSuchProviderException
                 | InvalidKeyException | NoSuchPaddingException | IllegalBlockSizeException | BadPaddingException ex) {
@@ -96,17 +92,23 @@ public class NotificationsSender {
         var vapidPublicKey = serverKeys.getBase64URLEncodedPublicKeyWithoutPadding();
         tracer.log("audience: " + audience);
         var authorizationToken = JsonWebSignature.create(serverKeys.getPrivateKey(), subject, audience);
-        registry.counter(audience).inc();
-        return PushServiceClient.sendNotification(endpoint, salt, ephemeralPublicKey, vapidPublicKey, authorizationToken,encryptedContent.encryptedContent());
+
+        var pushServiceHost = URI.create(audience).getHost();
+        if (pushServiceHost != null) {
+            registry.counter("webpush.push.attempts", "push_service", pushServiceHost).increment();
+        }
+
+        return PushServiceClient.sendNotification(endpoint, salt, ephemeralPublicKey, vapidPublicKey,
+                authorizationToken, encryptedContent.encryptedContent());
     }
 
     static String extractAud(String endpoint) {
-            var uri = URI.create(endpoint);
-            var host = uri.getHost();
-            var protocol = uri.getScheme();
-            if(uri == null || host == null)
-                return endpoint;
-            return String.format("%s://%s", protocol, host);       
+        var uri = URI.create(endpoint);
+        var host = uri.getHost();
+        var protocol = uri.getScheme();
+        if (host == null || protocol == null) {
+            return endpoint;
+        }
+        return "%s://%s".formatted(protocol, host);
     }
-
 }

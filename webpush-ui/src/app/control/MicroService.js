@@ -1,54 +1,43 @@
-const baseURI = "http://localhost:8080/";
+const configuredBaseURI = globalThis.GATELINK_BASE_URI || "http://localhost:8080";
+const baseURI = configuredBaseURI.replace(/\/+$/, '');
+const debug = false;
 
-const debug = true;
+const resourceURI = resource => `${baseURI}/${resource.replace(/^\/+/, '')}`;
 
-const post = (resource, body) => {
-    return request(resource,'POST',body);
-};
+const post = (resource, body) => request(resource, 'POST', body);
+const put = (resource, body) => request(resource, 'PUT', body);
+const del = resource => bodylessRequest(resource, 'DELETE');
+const get = resource => bodylessRequest(resource, 'GET');
 
-const put = (resource, body) => {
-    return request(resource,'PUT',body);
-};
-
-const del = async (resource) => { 
-    const encoded = encodeURI(resource);
-    return await bodylessRequest(encoded,'DELETE');
-}
-
-const get = (resource) => { 
-    return bodylessRequest(resource,'GET');
-}
-
-const bodylessRequest = async (resource,method) => { 
+const bodylessRequest = async (resource, method) => {
     const requestConfig = {
-        method: method,
+        method,
         headers: {
-            "Accept":"application/json"
+            "Accept": "application/json"
         }
+    };
+    const uri = resourceURI(resource);
+    if (debug) {
+        console.info(`${method} ${uri}`);
     }
-    const uri = `${baseURI}/${resource}`;
-    if(debug)
-        console.info(`${method} ${resource} ${uri}`);
-    return await fetch(uri, requestConfig);
-
-}
-const request = (resource, method, body) => {
-    if (debug)
-        console.log('Raw body',body);
-    const payload = JSON.stringify(body);
-    if (debug)
-        console.log('Stringified body',payload);
-    const requestConfig = {
-        method: method,
-        body: payload,
-        headers: {
-            "Content-type":"application/json"
-        }
-    }
-    const uri = encodeURI(`${baseURI}/${resource}`);
-    if(debug)
-        console.info(`${method} ${resource} ${uri}`, payload);
     return fetch(uri, requestConfig);
 };
 
-export { post,put,del,get };
+const request = (resource, method, body) => {
+    const payload = JSON.stringify(body);
+    const requestConfig = {
+        method,
+        body: payload,
+        headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+    };
+    const uri = resourceURI(resource);
+    if (debug) {
+        console.info(`${method} ${uri}`);
+    }
+    return fetch(uri, requestConfig);
+};
+
+export { post, put, del, get };

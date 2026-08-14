@@ -1,4 +1,3 @@
-
 package com.airhacks.gatelink.subscriptions.control;
 
 import com.airhacks.gatelink.subscriptions.entity.PushSubscription;
@@ -8,9 +7,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
-import org.eclipse.microprofile.metrics.annotation.Gauge;
 
 /**
+ * In-memory subscription store. This is suitable for development and demos;
+ * production deployments should replace it with durable storage.
  *
  * @author airhacks.com
  */
@@ -24,7 +24,6 @@ public class InMemorySubscriptionsStore {
         this.store = new ConcurrentHashMap<>();
     }
 
-    @Gauge(unit = "count")
     public int numberOfSubscriptions() {
         return this.store.size();
     }
@@ -44,5 +43,4 @@ public class InMemorySubscriptionsStore {
     public void remove(String endpoint) {
         this.store.remove(endpoint);
     }
-
 }

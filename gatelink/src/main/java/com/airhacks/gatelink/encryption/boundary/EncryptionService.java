@@ -1,4 +1,3 @@
-
 package com.airhacks.gatelink.encryption.boundary;
 
 import java.security.InvalidAlgorithmParameterException;
@@ -13,8 +12,6 @@ import javax.crypto.BadPaddingException;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.NoSuchPaddingException;
 
-import org.eclipse.microprofile.metrics.annotation.Metered;
-
 import com.airhacks.gatelink.encryption.control.EncryptionFlow;
 import com.airhacks.gatelink.encryption.entity.EncryptedContent;
 import com.airhacks.gatelink.keymanagement.control.ECKeyGenerator;
@@ -22,12 +19,14 @@ import com.airhacks.gatelink.keymanagement.entity.ECKeys;
 import com.airhacks.gatelink.notifications.boundary.Notification;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.enterprise.context.ApplicationScoped;
 
 /**
  * https://docs.oracle.com/en/java/javase/21/security/oracle-providers.html#GUID-091BF58C-82AB-4C9C-850F-1660824D5254
- * 
+ *
  * @author airhacks.com
  */
+@ApplicationScoped
 public class EncryptionService {
 
     SecureRandom random;
@@ -37,7 +36,6 @@ public class EncryptionService {
         this.random = new SecureRandom();
     }
 
-    @Metered
     public byte[] getNextSalt() {
         /*
          * https://www.rfc-editor.org/rfc/rfc8291.html

@@ -1,8 +1,8 @@
-
 package com.airhacks.gatelink.subscriptions.boundary;
 
 import com.airhacks.gatelink.subscriptions.control.InMemorySubscriptionsStore;
 import com.airhacks.gatelink.subscriptions.entity.PushSubscription;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
@@ -17,10 +17,8 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
-import org.eclipse.microprofile.metrics.annotation.Counted;
 
 /**
- *
  * @author airhacks.com
  */
 @RequestScoped
@@ -33,9 +31,7 @@ public class SubscriptionsResource {
     InMemorySubscriptionsStore store;
 
     @POST
-    @Counted(name = "subscribeActions", absolute = true)
     public void subscribe(PushSubscription subscription) {
-        System.out.println("Subscription " + subscription);
         this.store.addSubscription(subscription);
     }
 
@@ -46,24 +42,20 @@ public class SubscriptionsResource {
 
     @DELETE
     @Path("{endpoint}")
-    @Counted(name = "unsubscribeActions", absolute = true)
     public void unsubscribe(@PathParam("endpoint") String endpoint) {
         byte[] rawEndpoint = Base64.getUrlDecoder().decode(endpoint);
-        this.store.remove(new String(rawEndpoint));
+        this.store.remove(new String(rawEndpoint, StandardCharsets.UTF_8));
     }
 
     /**
-     *
      * @return a JsonArray of endpoints. An endpoint uniquely identifies a
-     * subscription
+     * subscription.
      */
     @GET
     public JsonArray all() {
-        return this.store.all().stream().
-                map(s -> s.endpoint).
-                map(Json::createValue).
-                collect(JsonCollectors.toJsonArray());
+        return this.store.all().stream()
+                .map(subscription -> subscription.endpoint)
+                .map(Json::createValue)
+                .collect(JsonCollectors.toJsonArray());
     }
-
-
 }

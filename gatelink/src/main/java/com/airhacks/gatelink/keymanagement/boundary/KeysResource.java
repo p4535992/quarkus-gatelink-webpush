@@ -1,13 +1,14 @@
-
 package com.airhacks.gatelink.keymanagement.boundary;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.JsonObject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 
 /**
+ * Exposes only the public VAPID key required by browser subscriptions.
  *
  * @author airhacks.com
  */
@@ -19,16 +20,9 @@ public class KeysResource {
     InMemoryKeyStore store;
 
     @GET
-    public JsonObject getKey() {
-        return this.store.getKeys().toJson();
-    }
-
-    @GET
     @Path("public")
+    @Produces(MediaType.TEXT_PLAIN)
     public String getPublicKey() {
         return this.store.getKeys().getBase64PublicKeyWithoutPadding();
     }
-
-
-
 }

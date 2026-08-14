@@ -1,63 +1,60 @@
-# Push Server
+# GateLink backend
 
-# Prerequisites
+## Prerequisites
 
-1. Java 21 / openJDK is installed
-2. [Maven](https://maven.apache.org/) is installed
+- Java 21
+- Maven 3.9+
 
+## Build
 
-# Build
+```bash
+mvn clean verify
+```
 
-`mvn packge`
+## Run
 
-# Run
+Development mode:
 
-`mvn quarkus:dev`
+```bash
+mvn quarkus:dev
+```
 
-# Typical Use Case
+Packaged JVM application:
 
-1. At the first use / startup VAPID keypair is created and stored in memory. These keys are used for the identification agains push services.
-2. The browser asks the user for permissions.
-3. The browser fetches the public VAPID key from the server and uses it to generate 
-a subscription object.
-4. The `Subscription` is send back to push server.
-5. The push server stores the subscription in memory and uses the "endpoint" slot as a key.
-6. A message (payload) can be send to the server via `POST /resources/notifications`
-7. The server will iterate over all subscriptions and send the payload using the endpoint from the `Subscription` object.
-8. For each message a new keypair is generated. The generated ephemeral keys are salted and used for encryption. 
-9. VAPID keys are used for signing (using JWT signature).
+```bash
+mvn clean package
+java -jar target/quarkus-app/quarkus-run.jar
+```
 
-# Build 
+## Web Push flow
 
-## Build and Unit Test execution
+1. GateLink loads the configured VAPID P-256 key pair. If no keys are configured, a temporary pair is generated for development.
+2. The browser requests notification permission.
+3. The browser fetches `GET /keys/public` and creates a Push API subscription with the VAPID public key.
+4. The browser posts the subscription to `POST /subscriptions`.
+5. GateLink stores the subscription in memory.
+6. A caller posts a text payload to `POST /notifications`.
+7. GateLink encrypts and forwards the payload to every registered push-service endpoint.
+8. VAPID keys sign the authorization token; per-message ephemeral EC keys are used for payload encryption.
 
-`cd pushserver` then
+## Production VAPID identity
 
-`mvn package` creates a deployable WAR in the `target` folder
+Configure both values as Base64URL without padding:
 
-## Integration Test Stage
+```bash
+export WEBPUSH_VAPID_PUBLIC_KEY='...'
+export WEBPUSH_VAPID_PRIVATE_KEY='...'
+```
 
-`mvn failsafe:integration-test` integration test execution. Push notifications
-are sent without deployment. Requires updates of subscriptions and server keys in: `pushserver/src/test/resources`
+Never expose or log the private key. If either property is supplied without the other, GateLink fails fast at startup.
 
-## Build System Test
+## Observability
 
-Switch to maven project pushserver-st: `cd pushserver-st`
+- readiness/liveness: `/q/health`
+- Prometheus/Micrometer metrics: `/q/metrics`
 
-`mvn package`
+## Known production gaps
 
-## Perform System Tests
+The subscription store is still in-memory and is lost on restart. The notification and subscription-management endpoints also need authentication/authorization before exposing this service as a public gateway.
 
-System tests are accessing a deployed pushserver. The system tests are attempting to resolve the `service.uri` environment entry, then a Java SystemProperty and finally
-they are using the `http://localhost:9080` as host name. It means: on local machine
-with stock openliberty installed, the system tests should execution without any additional configuration.
-
-`mvn failsafe:integration-test`
-
-
-
-
-
-
-
-
+The custom encryption path currently uses the legacy Web Push `aesgcm` content coding. RFC 8291 interoperability requires `aes128gcm`; that protocol migration should be implemented and tested separately against current browser push services.
