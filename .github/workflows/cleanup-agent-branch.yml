@@ -1,0 +1,21 @@
+name: Cleanup legacy agent branch
+
+on:
+  push:
+    branches:
+      - agent/quarkus-3.33-lts-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Keep replacement branch on the original modernization commit
+        run: git push origin 4aebc78daae9313b2f6985182ad519472f26ac21:refs/heads/update/quarkus-3.33-lts-modernization --force
+      - name: Delete legacy agent branch
+        run: git push origin --delete agent/quarkus-3.33-lts-modernization
