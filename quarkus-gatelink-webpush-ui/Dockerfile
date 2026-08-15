@@ -2,8 +2,9 @@ FROM node:24.18.0-bookworm-slim AS build
 
 WORKDIR /workspace
 
-COPY quarkus-gatelink-webpush-ui/package.json ./
-RUN npm install --no-audit --no-fund
+COPY quarkus-gatelink-webpush-ui/package.json \
+     quarkus-gatelink-webpush-ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY quarkus-gatelink-webpush-ui/angular.json \
      quarkus-gatelink-webpush-ui/tsconfig.json \
