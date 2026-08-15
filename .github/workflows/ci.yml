@@ -54,8 +54,23 @@ jobs:
       - name: Smoke test production Compose stack
         run: |
           docker compose --env-file .env.example up -d --no-build --wait --wait-timeout 120
+
+          # Nginx itself is healthy.
           curl --fail --silent --show-error http://127.0.0.1:8081/healthz
+
+          # /api is handled by Nginx and reaches the Quarkus container.
           curl --fail --silent --show-error http://127.0.0.1:8081/api/q/health/ready
+
+          # A client-side Angular route must return index.html after a refresh.
+          curl --fail --silent --show-error http://127.0.0.1:8081/dashboard | grep -q '<app-root'
+
+          # The non-root backend identity must be able to use both bind mounts.
+          docker compose --env-file .env.example exec -T backend \
+            sh -c 'test -w /opt/app/logs && test -w /opt/app/tmp'
+
+          # Quarkus file logging must actually create the persistent file.
+          test -f quarkus-gatelink-server/runtime/logs/application.log
+
           docker compose --env-file .env.example ps
 
       - name: Print Compose diagnostics on failure
