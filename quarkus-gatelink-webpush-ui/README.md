@@ -1,50 +1,51 @@
 # `quarkus-gatelink-webpush-ui`
 
-This folder is the production Angular + TypeScript frontend for GateLink.
+This module is the production Angular + TypeScript UI for GateLink. Angular is compiled during the Docker build and served by Nginx; production does **not** use `ng serve`.
 
-It is built during the Docker image build and served by Nginx. Production does **not** use `ng serve` or BrowserSync.
+Read also:
 
-See also:
+- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) — Docker/HTTPS deployment;
+- [`../docs/operator-guide.md`](../docs/operator-guide.md) — complete Web Push lifecycle.
 
-- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) for Docker/Nginx deployment;
-- [`../docs/operator-guide.md`](../docs/operator-guide.md) for the complete Web Push lifecycle.
+## Runtime identity
 
-## Runtime architecture
+Inside Docker, the Compose service name, container name and hostname are all:
+
+```text
+quarkus-gatelink-webpush-ui
+```
+
+Normal browser traffic uses HTTPS 443:
 
 ```text
 Browser
    |
-   | http(s)://frontend/
+   | HTTPS :443
    v
-Nginx :80
+quarkus-gatelink-webpush-ui
+Angular + Nginx
    |
-   +-- Angular static files
-   |
-   `-- /api/* -----------------> backend:8080
-                                  Quarkus
+   | /api/* over HTTPS :8443
+   | Docker DNS hostname
+   v
+quarkus-gatelink-webpush-server
+Quarkus
 ```
 
-The browser never uses Docker service names. It only talks to the same origin that served Angular.
+The browser never sees or needs Docker service names. It only talks to the origin that served Angular.
 
-Angular calls GateLink through:
+## Published ports
 
 ```text
-/api
+80   HTTP  -> redirects normal requests to HTTPS
+443  HTTPS -> normal browser/user entry point
 ```
 
-Nginx resolves the Compose hostname `backend` and removes the `/api/` prefix before proxying.
-
-Example:
-
-```text
-Browser:  /api/keys/public
-Nginx:    http://backend:8080/keys/public
-Quarkus:  GET /keys/public
-```
+Nginx keeps a cheap container-local HTTP `/healthz` endpoint on port 80 for the Docker healthcheck; ordinary HTTP paths redirect with `308`.
 
 ## Angular stack
 
-The frontend uses:
+The UI uses:
 
 - Angular 22;
 - TypeScript 6;
@@ -58,6 +59,7 @@ Important files:
 
 ```text
 Dockerfile
+docker-entrypoint.sh
 nginx.conf
 package.json
 angular.json
@@ -87,22 +89,95 @@ node:24.18.0-bookworm-slim
 dist/gatelink-webpush-ui/browser
         |
         v
-nginx:1.28.3-alpine
+nginx:1.28.3-alpine + OpenSSL
         |
         v
 /usr/share/nginx/html
 ```
 
-Build only this image from the repository root:
+Build only this image:
 
 ```bash
-docker compose build frontend
+docker compose build quarkus-gatelink-webpush-ui
 ```
 
 Run/update only this service:
 
 ```bash
-docker compose up -d --no-deps frontend
+docker compose up -d --no-deps quarkus-gatelink-webpush-ui
+```
+
+## Self-signed UI certificate
+
+On first container start, `docker-entrypoint.sh` creates:
+
+```text
+/etc/nginx/tls/tls.crt
+/etc/nginx/tls/tls.key
+```
+
+if they are not already present in the `ui_tls` Docker volume.
+
+Defaults:
+
+```text
+UI_TLS_COMMON_NAME=quarkus-gatelink-webpush-ui
+UI_TLS_SAN=DNS:quarkus-gatelink-webpush-ui,DNS:localhost,IP:127.0.0.1
+TLS_DAYS=825
+```
+
+If users open the UI through another hostname/IP, include it in `UI_TLS_SAN` before the first start.
+
+The certificate is self-signed, therefore the browser must explicitly trust or accept it. No TLS private key is committed to Git.
+
+## Nginx HTTPS behavior
+
+Nginx listens on 443 with:
+
+```text
+TLS 1.2 / TLS 1.3
+/etc/nginx/tls/tls.crt
+/etc/nginx/tls/tls.key
+```
+
+Angular calls GateLink only with relative same-origin paths:
+
+```text
+/api/keys/public
+/api/subscriptions
+/api/notifications
+```
+
+The API upstream is:
+
+```nginx
+location /api/ {
+    proxy_pass https://quarkus-gatelink-webpush-server:8443/;
+    proxy_ssl_server_name on;
+    proxy_ssl_name quarkus-gatelink-webpush-server;
+    proxy_ssl_verify off;
+}
+```
+
+The trailing slash is intentional:
+
+```text
+Browser:  https://host/api/keys/public
+Nginx:    https://quarkus-gatelink-webpush-server:8443/keys/public
+Quarkus:  GET /keys/public
+```
+
+`proxy_ssl_verify off` is used because the internal Quarkus certificate is self-signed. The connection is encrypted, but this mode does not authenticate the upstream certificate chain. A deployment with an internal CA can configure Nginx to trust that CA and enable verification.
+
+Nginx also forwards:
+
+```text
+Host
+X-Real-IP
+X-Forwarded-For
+X-Forwarded-Host
+X-Forwarded-Proto=https
+X-Forwarded-Port=443
 ```
 
 ## Browser subscription flow
@@ -110,40 +185,43 @@ docker compose up -d --no-deps frontend
 ```text
 User
   |
-  | Subscribe
+  | opens HTTPS UI and chooses Subscribe
   v
 Angular
   |
   | GET /api/keys/public
   v
-Nginx
+Nginx :443
   |
-  | GET /keys/public
+  | HTTPS to quarkus-gatelink-webpush-server:8443/keys/public
   v
 GateLink
   |
   | public VAPID key
   v
-Angular SwPush
+Angular / SwPush
   |
   | requestSubscription
   v
-Browser Push Service
+Browser Push API
   |
-  | PushSubscription(endpoint, p256dh, auth)
+  | registration with vendor Push Service
+  v
+PushSubscription(endpoint, p256dh, auth)
+  |
   v
 Angular
   |
   | POST /api/subscriptions
   v
-GateLink -> PostgreSQL
+Nginx :443 -> Quarkus :8443 -> PostgreSQL
 ```
 
-The frontend never receives the VAPID private key.
+The UI never receives the VAPID private key.
 
 ## `GateLinkWebPushService`
 
-The production Angular service uses a fixed same-origin base:
+The production Angular service uses:
 
 ```ts
 private readonly baseUrl = '/api';
@@ -152,60 +230,29 @@ private readonly baseUrl = '/api';
 Subscription sequence:
 
 1. verify Angular Service Worker / Push API availability;
-2. reuse an existing subscription if one already exists;
+2. reuse an existing browser subscription if present;
 3. request `/api/keys/public`;
 4. call `SwPush.requestSubscription({ serverPublicKey })`;
 5. POST `subscription.toJSON()` to `/api/subscriptions`.
 
 Unsubscribe sequence:
 
-1. obtain current browser subscription;
-2. Base64URL-encode the Push Service endpoint;
+1. obtain the current browser subscription;
+2. Base64URL-encode its Push Service endpoint;
 3. DELETE `/api/subscriptions/{encodedEndpoint}`;
-4. only after server-side removal succeeds, call `SwPush.unsubscribe()`.
+4. after server-side removal succeeds, call `SwPush.unsubscribe()`.
 
-That order prevents silently losing the browser-side reference while GateLink still believes the endpoint is registered.
+This order avoids removing the local browser reference while GateLink still has the subscription stored.
 
-## Service Worker and HTTPS
+## Service Worker and secure context
 
-Angular Service Worker is enabled in production builds.
-
-Browser Push API and Service Workers require a secure context. Therefore:
+Angular Service Worker is enabled in production builds. The production Compose path now provides HTTPS directly in Nginx, so normal browser use is:
 
 ```text
-http://localhost     suitable for local development
-https://...          required for real production browser use
+https://<host>/
 ```
 
-The Compose Nginx image serves HTTP directly; a real deployment should terminate TLS either in Nginx with deployment-specific certificates or, more commonly, at an upstream ingress/reverse proxy/load balancer.
-
-## Nginx API proxy
-
-The relevant configuration is:
-
-```nginx
-location /api/ {
-    proxy_pass http://backend:8080/;
-}
-```
-
-The slash after `8080/` is intentional. It replaces the matching `/api/` prefix.
-
-```text
-/api/subscriptions -> /subscriptions
-/api/q/health      -> /q/health
-```
-
-The proxy also forwards:
-
-```text
-Host
-X-Real-IP
-X-Forwarded-For
-X-Forwarded-Proto
-```
-
-`/api` without a trailing slash receives a redirect to `/api/`, so it cannot fall into Angular routing.
+For localhost-only Angular development, browser secure-context exceptions may apply, but that is separate from the production Docker path.
 
 ## Angular SPA routing
 
@@ -217,7 +264,7 @@ location / {
 }
 ```
 
-Therefore direct refreshes of routes such as:
+so direct refreshes of:
 
 ```text
 /dashboard
@@ -226,54 +273,53 @@ Therefore direct refreshes of routes such as:
 
 return Angular `index.html` rather than Nginx 404.
 
-The `/api/` location is handled separately and is not affected by the SPA fallback.
+`/api/` is handled separately and never falls through to the SPA fallback.
 
-## Frontend healthcheck
+Service Worker bootstrap/manifest files are revalidated; hashed Angular application assets can be cached aggressively.
 
-Nginx exposes:
+## Healthcheck
+
+Inside the UI container:
 
 ```text
-GET /healthz
+GET http://127.0.0.1/healthz -> 200 ok
 ```
 
-which returns HTTP 200 and `ok`.
+From the host/operator side HTTPS is also available:
 
-Compose checks this endpoint locally inside the frontend container.
+```bash
+curl -k https://localhost/healthz
+```
 
 ## Local Angular development
 
-For frontend-only development you can still run:
+Frontend-only development can still use:
 
 ```bash
 npm install
 npm start
 ```
 
-However the production architecture is the Docker/Nginx path. A local `ng serve` session needs its own development proxy configuration or an alternate API arrangement; it does not use Docker DNS hostname `backend` directly from the browser.
+A local `ng serve` process needs its own development API proxy/arrangement. Browser JavaScript must never try to resolve the Docker-only hostname `quarkus-gatelink-webpush-server` directly.
 
 ## Integration examples
 
-Copy-ready framework examples remain under:
+Copy-ready examples are under:
 
 ```text
 examples/angular-typescript/
 ```
 
-The example service now also defaults to `/api`, matching the production Nginx layout.
+They use `/api`, matching the Nginx production layout.
 
 ## Security rules
 
-Never put these in Angular source, runtime config downloaded by the browser, or generated bundles:
+Never put these in Angular source, generated static bundles or browser-downloadable runtime configuration:
 
 - VAPID private key;
 - PostgreSQL credentials;
 - confidential OIDC client secrets;
-- other users' stored PushSubscription secrets.
+- another user's stored PushSubscription secrets;
+- TLS private keys.
 
 The browser only needs the public VAPID key returned by GateLink.
-
-## HTTPS runtime
-
-The UI service/container/hostname is `quarkus-gatelink-webpush-ui`. Nginx listens on `443` for normal user traffic and keeps port `80` for redirect plus the local health endpoint. A self-signed certificate is generated on first start and persisted at `/etc/nginx/tls`.
-
-`/api/` is proxied to `https://quarkus-gatelink-webpush-server:8443/` using Docker DNS; the browser never needs the internal server hostname.
