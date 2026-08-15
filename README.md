@@ -25,6 +25,7 @@ Additional documentation:
 | Document | Purpose |
 | --- | --- |
 | [`docs/operator-guide.md`](docs/operator-guide.md) | complete operator-oriented runtime lifecycle |
+| [`docs/webpush-java.md`](docs/webpush-java.md) | selected Java Web Push library, integration boundary and modern-only rules |
 | [`docs/integration-examples.md`](docs/integration-examples.md) | Java and TypeScript integration examples |
 | [`quarkus-gatelink-server/README.md`](quarkus-gatelink-server/README.md) | server internals and configuration |
 | [`quarkus-gatelink-webpush-ui/README.md`](quarkus-gatelink-webpush-ui/README.md) | browser-side behavior |
@@ -66,6 +67,70 @@ The most important operational fact is that **GateLink never opens a direct conn
 | OIDC provider | authenticates administrative callers |
 | Push Service | accepts Web Push requests and delivers to the browser |
 | Service Worker | receives the browser `push` event and shows the notification |
+
+## Why PostgreSQL exists
+
+PostgreSQL is **not required by the Web Push protocol itself**. GateLink uses PostgreSQL as a durable registry of browser subscriptions.
+
+When a browser subscribes, GateLink receives:
+
+```text
+endpoint + p256dh + auth
+```
+
+Those values answer the question **"which browsers can GateLink send to, and with which Web Push key material?"**.
+
+```text
+Browser subscribes
+      |
+      | POST /subscriptions
+      v
+GateLink
+      |
+      | persist endpoint + p256dh + auth
+      v
+PostgreSQL
+
+... later, possibly after a GateLink restart ...
+
+Admin sends notification
+      |
+      v
+GateLink
+      |
+      | SELECT subscriptions
+      v
+PostgreSQL
+      |
+      | list of delivery targets
+      v
+GateLink -> Push Services
+```
+
+Without a persistent store, GateLink would forget all registered browsers when the process restarts. The alternatives would be to make every browser register again after every server restart, or to require the caller to provide all PushSubscriptions with every notification request.
+
+PostgreSQL therefore stores **routing/subscription state**, not messages.
+
+It is **not** used as:
+
+- a Web Push message queue;
+- notification history;
+- a browser-delivery acknowledgement store;
+- storage for the VAPID private key;
+- a requirement of `nl.martijndwars:web-push`.
+
+The current table is intentionally small:
+
+```text
+push_subscriptions
++----------+----------------------------------+
+| endpoint | TEXT PRIMARY KEY                 |
+| p256dh   | TEXT NOT NULL                    |
+| auth     | TEXT NOT NULL                    |
++----------+----------------------------------+
+```
+
+PostgreSQL could technically be replaced by another durable subscription store in a different architecture; what GateLink needs is the ability to persist, read and delete PushSubscriptions reliably.
 
 ## End-to-end lifecycle: step by step
 
@@ -236,17 +301,6 @@ cd quarkus-gatelink-webpush-ui
 
 ## PostgreSQL persistence
 
-The durable state is the browser PushSubscription:
-
-```text
-push_subscriptions
-+----------+----------------------------------+
-| endpoint | TEXT PRIMARY KEY                 |
-| p256dh   | TEXT NOT NULL                    |
-| auth     | TEXT NOT NULL                    |
-+----------+----------------------------------+
-```
-
 Registration is idempotent for the same endpoint because GateLink uses PostgreSQL `INSERT ... ON CONFLICT DO UPDATE`.
 
 Inspect local subscriptions:
@@ -271,21 +325,48 @@ export WEBPUSH_VAPID_SUBJECT='mailto:admin@example.com'
 
 If neither key is configured, GateLink generates a temporary pair. This is convenient for development but not appropriate for a restart-safe production installation even though PostgreSQL itself is persistent.
 
-## Web Push implementation
+## Selected Java Web Push library
 
-GateLink delegates the cryptographic body generation to:
+GateLink remains a single Java/Quarkus service and uses:
 
 ```text
-nl.martijndwars:web-push 5.1.2
+nl.martijndwars:web-push:5.1.2
 ```
 
-GateLink always chooses:
+Upstream project:
+
+- https://github.com/web-push-libs/webpush-java
+
+The integration is intentionally narrow. The library is used for RFC 8291 / RFC 8188 **payload encryption**, while GateLink retains control of VAPID identity, VAPID JWT generation, outbound HTTP, response metrics, persistence and security.
+
+```text
+PostgreSQL subscription
+(endpoint + p256dh + auth)
+        |
+        v
+GateLink EncryptionService
+        |
+        | nl.martijndwars:web-push
+        | Encoding.AES128GCM
+        v
+Encrypted RFC 8291 / RFC 8188 body
+        |
+        +--> GateLink VAPID JWT
+        |
+        v
+GateLink JDK HttpClient
+        |
+        v
+Browser Push Service
+```
+
+GateLink explicitly calls:
 
 ```java
 Encoding.AES128GCM
 ```
 
-The outbound HTTP request remains under GateLink control so the wire contract is explicitly modern-only:
+and does not use the library's generic legacy-compatible sender path. GateLink constructs the outbound request itself so the wire contract remains modern-only:
 
 ```text
 TTL: 2419200
@@ -294,7 +375,9 @@ Authorization: vapid t=<JWT>, k=<public-key>
 Content-Type: application/octet-stream
 ```
 
-GateLink does not emit legacy `Encryption` or `Crypto-Key` delivery headers.
+GateLink does not emit legacy `Encryption` or `Crypto-Key` delivery headers and has no `aesgcm` application path.
+
+For the rationale, exact responsibility boundary and upgrade/test rules, see [`docs/webpush-java.md`](docs/webpush-java.md).
 
 ## Security and validation
 
@@ -375,12 +458,13 @@ These behaviors are documented in detail in [`docs/operator-guide.md`](docs/oper
 - Micrometer + Prometheus
 - OpenTelemetry + JDBC telemetry
 - structured JSON production logging
-- `nl.martijndwars:web-push` for modern Web Push payload encryption
+- `nl.martijndwars:web-push` 5.1.2 for modern Web Push payload encryption
 - Angular / TypeScript integration example
 
 ## More documentation
 
 - **Operator lifecycle:** [`docs/operator-guide.md`](docs/operator-guide.md)
+- **Java Web Push library:** [`docs/webpush-java.md`](docs/webpush-java.md)
 - **Java / TypeScript integration:** [`docs/integration-examples.md`](docs/integration-examples.md)
 - **Server implementation:** [`quarkus-gatelink-server/README.md`](quarkus-gatelink-server/README.md)
 - **Browser implementation:** [`quarkus-gatelink-webpush-ui/README.md`](quarkus-gatelink-webpush-ui/README.md)
