@@ -1,148 +1,118 @@
 # Docker / Docker Compose deployment
 
-This guide is the operational reference for the GateLink Docker stack.
+This guide documents the production-oriented GateLink Compose layout and runtime contract.
 
-## 1. Runtime topology
-
-The stack contains three services:
+## Layout
 
 ```text
-User / Browser
-      |
-      | HTTPS :443
-      v
-+----------------------------------+
-| quarkus-gatelink-webpush-ui      |
-| Angular + Nginx                  |
-| HTTP :80 -> HTTPS redirect       |
-| HTTPS :443                       |
-+----------------+-----------------+
-                 |
-                 | /api/*
-                 | HTTPS :8443
-                 | Docker DNS hostname:
-                 | quarkus-gatelink-webpush-server
-                 v
-+----------------------------------+
-| quarkus-gatelink-webpush-server  |
-| Quarkus / Java 21                |
-| HTTP :8080                       |
-| HTTPS :8443                      |
-+----------------+-----------------+
-                 |
-                 | JDBC
-                 | postgres:5432
-                 v
-+----------------------------------+
-| postgres                         |
-| PostgreSQL 18                    |
-+----------------------------------+
+quarkus-gatelink-webpush/
+├── docker-compose.yml
+├── .env.example
+├── config/
+│   └── nginx.conf
+├── data/
+│   └── quarkus-gatelink-webpush-server/
+│       ├── logs/
+│       └── tmp/
+├── quarkus-gatelink-webpush-server/
+│   ├── Dockerfile
+│   ├── docker-entrypoint.sh
+│   ├── application.properties
+│   ├── pom.xml
+│   ├── README.md
+│   └── src/
+└── quarkus-gatelink-webpush-ui/
+    ├── Dockerfile
+    ├── docker-entrypoint.sh
+    ├── package.json
+    ├── angular.json
+    ├── README.md
+    └── src/
 ```
 
-The server also makes outbound HTTPS requests to browser Push Services. An external OIDC issuer may also be contacted when OIDC is enabled.
+The roles are intentionally simple:
 
-## 2. Fixed service, container and hostname names
+- `docker-compose.yml`: single source for the source-tree deployment;
+- `config/nginx.conf`: Nginx TLS/reverse-proxy configuration;
+- `data/quarkus-gatelink-webpush-server/`: host-visible Quarkus logs and temp data;
+- `quarkus-gatelink-webpush-server/application.properties`: external Docker/production Quarkus config;
+- `quarkus-gatelink-webpush-server/src/main/resources/application.properties`: normal Maven/dev/test config.
 
-GateLink deliberately uses the same string for the Compose service name, `container_name` and Docker hostname:
+There is no `deploy/` directory and no second checked-in Compose topology.
+
+## Runtime topology
+
+```text
+Browser
+   |
+   | HTTPS :443
+   v
+quarkus-gatelink-webpush-ui
+Angular + Nginx
+   |
+   | /api/*
+   | HTTPS :8443
+   | Docker DNS
+   v
+quarkus-gatelink-webpush-server
+Quarkus / Java 21
+   |
+   | JDBC
+   v
+postgres :5432
+```
+
+The server also makes outbound HTTPS requests to browser Push Services.
+
+## Fixed service/container/hostname identities
+
+The service name, `container_name` and hostname are identical for the two application containers:
 
 ```text
 quarkus-gatelink-webpush-ui
 quarkus-gatelink-webpush-server
 ```
 
-PostgreSQL uses the service hostname:
+Nginx therefore reaches Quarkus at:
 
 ```text
-postgres
+https://quarkus-gatelink-webpush-server:8443/
 ```
 
-Container-to-container communication must use those Docker DNS names. `localhost` refers only to the process's own container.
+Do not replace that internal Docker hostname with `localhost`.
 
-## 3. Published ports
+## Published ports
 
-| Service | Host port | Container port | Protocol | Purpose |
-| --- | ---: | ---: | --- | --- |
-| `quarkus-gatelink-webpush-ui` | `80` | `80` | HTTP | redirect user traffic to HTTPS; container-local `/healthz` also exists |
-| `quarkus-gatelink-webpush-ui` | `443` | `443` | HTTPS | **normal browser/user entry point** |
-| `quarkus-gatelink-webpush-server` | `8080` | `8080` | HTTP | direct REST/operations access when explicitly needed |
-| `quarkus-gatelink-webpush-server` | `8443` | `8443` | HTTPS | direct REST/operations access over TLS |
-| `postgres` | not published | `5432` | PostgreSQL | internal server → database traffic only |
+| Service | Host port | Protocol | Purpose |
+| --- | ---: | --- | --- |
+| UI | `80` | HTTP | redirect normal traffic to HTTPS |
+| UI | `443` | HTTPS | normal browser entry point |
+| Quarkus | `8080` | HTTP | direct REST/operations access |
+| Quarkus | `8443` | HTTPS | direct TLS REST/operations access |
+| PostgreSQL | none | PostgreSQL | internal only |
 
-For ordinary application use, clients should use the UI HTTPS origin on port `443` and reach GateLink REST endpoints through `/api/...`.
-
-## 4. Repository layout
-
-```text
-quarkus-gatelink-webpush/
-├── compose.yaml
-├── .env.example
-├── deploy/
-│   ├── server/
-│   │   └── application.properties
-│   └── release/
-│       ├── compose.yaml
-│       ├── server.Dockerfile
-│       ├── ui.Dockerfile
-│       └── README.md
-│
-├── quarkus-gatelink-webpush-server/
-│   ├── Dockerfile
-│   ├── docker-entrypoint.sh
-│   ├── pom.xml
-│   ├── runtime/
-│   │   ├── logs/
-│   │   └── tmp/
-│   └── src/
-│
-└── quarkus-gatelink-webpush-ui/
-    ├── Dockerfile
-    ├── docker-entrypoint.sh
-    ├── nginx.conf
-    ├── package.json
-    ├── angular.json
-    └── src/
-```
-
-The external Quarkus runtime configuration intentionally lives in `deploy/server/`, outside the Maven module. Compose mounts it read-only at:
-
-```text
-/opt/app/config/application.properties
-```
-
-This prevents Docker-only hostnames and TLS paths from leaking into normal Maven test/dev execution.
-
-## 5. Prepare the host
-
-From the repository root:
+## Prepare the host
 
 ```bash
 cp .env.example .env
-mkdir -p quarkus-gatelink-webpush-server/runtime/logs
-mkdir -p quarkus-gatelink-webpush-server/runtime/tmp
+
+mkdir -p data/quarkus-gatelink-webpush-server/logs
+mkdir -p data/quarkus-gatelink-webpush-server/tmp
+
+sudo chown -R 10001:10001 data/quarkus-gatelink-webpush-server/logs
+sudo chown -R 10001:10001 data/quarkus-gatelink-webpush-server/tmp
+sudo chmod 0750 data/quarkus-gatelink-webpush-server/logs
+sudo chmod 0750 data/quarkus-gatelink-webpush-server/tmp
+
+chmod 0644 quarkus-gatelink-webpush-server/application.properties
+chmod 0644 config/nginx.conf
 ```
 
-The Quarkus runtime uses:
+The server image runs as UID/GID `10001:10001`, so its bind-mounted data directories must be writable by that identity.
 
-```text
-UID 10001
-GID 10001
-```
+## Configure `.env`
 
-Prepare the source-Compose bind mounts:
-
-```bash
-sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/logs
-sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/tmp
-sudo chmod 0750 quarkus-gatelink-webpush-server/runtime/logs
-sudo chmod 0750 quarkus-gatelink-webpush-server/runtime/tmp
-chmod 0644 deploy/server/application.properties
-```
-
-The downloadable Release bundle uses Docker named volumes for server logs/tmp instead, so it does not require these host-directory ownership commands.
-
-## 6. Configure `.env`
-
-At minimum change production secrets and VAPID identity:
+At minimum configure production database and VAPID values:
 
 ```text
 POSTGRES_PASSWORD
@@ -151,62 +121,38 @@ WEBPUSH_VAPID_PRIVATE_KEY
 WEBPUSH_VAPID_SUBJECT
 ```
 
-The supplied example intentionally allows a local self-contained boot with:
+The three-container stack does not include an identity provider. The example therefore defaults to:
 
 ```text
 OIDC_ENABLED=false
 OIDC_CLIENT_ID=quarkus-gatelink-webpush-server
 ```
 
-For production administrative endpoints, configure a real external issuer:
+For protected administrative endpoints, enable OIDC and provide the real issuer.
 
-```text
-OIDC_ENABLED=true
-OIDC_AUTH_SERVER_URL=https://id.example.com/realms/gatelink
-OIDC_CLIENT_ID=quarkus-gatelink-webpush-server
-```
+## TLS
 
-and use an access token carrying role `gatelink-admin`.
+No private TLS key is committed to Git.
 
-## 7. Self-signed TLS configuration
-
-GateLink generates self-signed certificates at container startup if no certificate exists in the corresponding TLS volume.
-
-No certificate private key is committed to Git.
-
-### UI certificate
-
-Generated inside `quarkus-gatelink-webpush-ui`:
+The UI entrypoint generates:
 
 ```text
 /etc/nginx/tls/tls.crt
 /etc/nginx/tls/tls.key
 ```
 
-Persisted in the Docker named volume:
+stored in Docker volume `ui_tls`.
 
-```text
-ui_tls
-```
-
-### Quarkus server certificate
-
-Generated inside `quarkus-gatelink-webpush-server`:
+The server entrypoint generates:
 
 ```text
 /opt/app/tls/tls.crt
 /opt/app/tls/tls.key
 ```
 
-Persisted in:
+stored in Docker volume `server_tls`.
 
-```text
-server_tls
-```
-
-### Default certificate identity
-
-`.env.example` contains:
+Default identities come from `.env.example`:
 
 ```text
 TLS_DAYS=825
@@ -216,84 +162,55 @@ SERVER_TLS_COMMON_NAME=quarkus-gatelink-webpush-server
 SERVER_TLS_SAN=DNS:quarkus-gatelink-webpush-server,DNS:localhost,IP:127.0.0.1
 ```
 
-If an operator opens the UI as, for example, `https://gatelink.internal.example/`, add that DNS name to `UI_TLS_SAN` before the first start:
+Add the actual deployment DNS name/IP to the SAN list before the first start when clients use another hostname.
+
+Self-signed TLS encrypts traffic but is not automatically trusted. Browser/operator clients must explicitly trust or accept the certificate.
+
+## Quarkus runtime config
+
+The Docker/production external config is:
 
 ```text
-UI_TLS_SAN=DNS:quarkus-gatelink-webpush-ui,DNS:localhost,DNS:gatelink.internal.example,IP:127.0.0.1
+quarkus-gatelink-webpush-server/application.properties
 ```
 
-If direct HTTPS calls use that host as well, add it to `SERVER_TLS_SAN` too.
+Compose mounts it read-only as:
 
-Changing SAN/CN environment variables later does **not** rewrite an existing certificate. Stop the stack and remove only the appropriate TLS volume(s) when a certificate must be regenerated. Do not delete `postgres_data` just to regenerate TLS material.
+```text
+/opt/app/config/application.properties
+```
 
-### Trust behavior
-
-A self-signed certificate is encrypted TLS but is not automatically trusted by browsers/clients. Operators must import/trust the UI certificate or explicitly accept the warning.
-
-Do not enable HSTS while using an untrusted development/self-signed certificate because HSTS makes certificate recovery and hostname changes harder for operators.
-
-## 8. Quarkus HTTPS configuration
-
-The container external configuration enables both HTTP and HTTPS at the same time:
+It enables both listeners:
 
 ```properties
-quarkus.http.host=0.0.0.0
 quarkus.http.port=8080
 quarkus.http.ssl-port=8443
 quarkus.http.insecure-requests=enabled
-quarkus.tls.key-store.pem.0.cert=/opt/app/tls/tls.crt
-quarkus.tls.key-store.pem.0.key=/opt/app/tls/tls.key
 ```
 
-This gives the requested server contract:
+and points the datasource to:
 
 ```text
-HTTP  :8080
-HTTPS :8443
+jdbc:postgresql://postgres:5432/${DB_NAME}
 ```
 
-The server healthcheck deliberately uses the HTTPS listener:
+The file at `src/main/resources/application.properties` remains the normal Maven/dev/test configuration and is not the Docker override.
+
+## Nginx proxy config
+
+The canonical proxy file is:
 
 ```text
-https://127.0.0.1:8443/q/health/ready
+config/nginx.conf
 ```
 
-with certificate verification disabled because the certificate is self-signed.
-
-## 9. Nginx HTTPS configuration
-
-Nginx has two server blocks.
-
-### Port 80
-
-The local `/healthz` endpoint remains available for the container healthcheck; all normal paths redirect to HTTPS:
-
-```nginx
-location / {
-    return 308 https://$host$request_uri;
-}
-```
-
-### Port 443
-
-Nginx loads:
+Compose also bind-mounts that file read-only into:
 
 ```text
-/etc/nginx/tls/tls.crt
-/etc/nginx/tls/tls.key
+/etc/nginx/conf.d/default.conf
 ```
 
-and accepts TLS 1.2/1.3.
-
-Angular calls relative same-origin REST URLs such as:
-
-```text
-/api/keys/public
-/api/subscriptions
-/api/notifications
-```
-
-Nginx forwards `/api/` to the **internal Docker hostname**:
+The API block sends requests to internal HTTPS:
 
 ```nginx
 location /api/ {
@@ -304,375 +221,153 @@ location /api/ {
 }
 ```
 
-The trailing `/` on `proxy_pass` is intentional:
+`proxy_ssl_verify off` is specific to the self-signed internal mode. With an internal CA, configure the CA and enable verification.
 
-```text
-Browser request:
-https://host/api/keys/public
-
-Nginx upstream:
-https://quarkus-gatelink-webpush-server:8443/keys/public
-```
-
-`proxy_ssl_verify off` is limited to this self-signed internal-TLS mode. With an internal CA, configure Nginx to trust that CA and enable upstream certificate verification.
-
-Nginx forwards:
-
-```text
-Host
-X-Real-IP
-X-Forwarded-For
-X-Forwarded-Host
-X-Forwarded-Proto=https
-X-Forwarded-Port=443
-```
-
-## 10. Angular SPA routing
-
-The HTTPS server uses:
-
-```nginx
-location / {
-    try_files $uri $uri/ /index.html;
-}
-```
-
-so direct browser refreshes on routes such as:
-
-```text
-/dashboard
-/settings
-```
-
-return the Angular application instead of Nginx 404.
-
-`/api/` is a separate, more specific location and never falls through to Angular `index.html`.
-
-Angular Service Worker metadata remains revalidatable while hashed application assets are cached aggressively.
-
-## 11. Build the source stack
+## Build and start
 
 ```bash
-docker compose build
+docker compose -f docker-compose.yml config
+docker compose -f docker-compose.yml build
+docker compose -f docker-compose.yml up -d --wait
+docker compose -f docker-compose.yml ps
 ```
 
-### Server image
-
-Build stage:
-
-```text
-maven:3.9.13-eclipse-temurin-21-noble
-```
-
-Runtime:
-
-```text
-eclipse-temurin:21-jre-noble
-```
-
-The image installs `curl` for health checks and `openssl` for first-start self-signed certificate generation.
-
-The Docker build creates an uber-JAR and copies it to:
-
-```text
-/opt/app/app.jar
-```
-
-The runtime process is non-root `10001:10001`.
-
-### UI image
-
-Build stage:
-
-```text
-node:24.18.0-bookworm-slim
-```
-
-Runtime:
-
-```text
-nginx:1.28.3-alpine
-```
-
-`ng serve` is not used in production. Nginx serves the compiled Angular files and has OpenSSL available for certificate generation.
-
-## 12. Start the stack
-
-```bash
-docker compose up -d --wait
-docker compose ps
-```
-
-Expected dependency chain:
+Expected startup order:
 
 ```text
 postgres healthy
-      |
-      v
-quarkus-gatelink-webpush-server healthy
-      |
-      v
-quarkus-gatelink-webpush-ui healthy
+   -> quarkus-gatelink-webpush-server healthy
+      -> quarkus-gatelink-webpush-ui healthy
 ```
 
-## 13. Verify the stack
+## Verify
 
-### Normal UI path
+HTTP redirect:
 
 ```bash
 curl -I http://localhost/
+```
+
+HTTPS UI and reverse proxy:
+
+```bash
 curl -k https://localhost/healthz
 curl -k https://localhost/api/q/health/ready
 curl -k https://localhost/dashboard
 ```
 
-Expected:
-
-- HTTP `/` returns `308`;
-- HTTPS `/healthz` returns `200`;
-- `/api/q/health/ready` reaches Quarkus through Nginx over internal HTTPS;
-- `/dashboard` returns Angular `index.html`.
-
-### Direct Quarkus path
+Direct Quarkus:
 
 ```bash
 curl http://localhost:8080/q/health/ready
 curl -k https://localhost:8443/q/health/ready
 ```
 
-Both are intentionally enabled.
-
-### Fixed container names/hostnames
+Docker identities:
 
 ```bash
 docker inspect -f '{{.Name}} {{.Config.Hostname}}' quarkus-gatelink-webpush-ui
 docker inspect -f '{{.Name}} {{.Config.Hostname}}' quarkus-gatelink-webpush-server
 ```
 
-Expected values:
-
-```text
-/quarkus-gatelink-webpush-ui quarkus-gatelink-webpush-ui
-/quarkus-gatelink-webpush-server quarkus-gatelink-webpush-server
-```
-
-### Internal DNS resolution
+Internal DNS:
 
 ```bash
-docker compose exec quarkus-gatelink-webpush-ui \
+docker compose -f docker-compose.yml exec quarkus-gatelink-webpush-ui \
   getent hosts quarkus-gatelink-webpush-server
 ```
 
-## 14. PostgreSQL
+## Data and persistence
 
-GateLink uses the pinned Docker Official Image:
-
-```text
-postgres:18.4
-```
-
-PostgreSQL is not published on the host.
-
-The named volume:
+PostgreSQL uses the named Docker volume:
 
 ```text
 postgres_data
 ```
 
-is mounted at `/var/lib/postgresql` as required by the official PostgreSQL 18 image layout.
-
-GateLink stores browser PushSubscriptions (`endpoint`, `p256dh`, `auth`) in PostgreSQL. PostgreSQL is **not** a notification queue, notification-history store, delivery acknowledgement store or VAPID private-key store.
-
-## 15. Server logs and temporary files
-
-Source Compose bind mounts:
+TLS uses:
 
 ```text
-./quarkus-gatelink-webpush-server/runtime/logs -> /opt/app/logs
-./quarkus-gatelink-webpush-server/runtime/tmp  -> /opt/app/tmp
+server_tls
+ui_tls
 ```
 
-`JAVA_TOOL_OPTIONS` points `java.io.tmpdir` to `/opt/app/tmp`.
-
-Quarkus logs both to stdout/stderr and:
+Quarkus logs and temp files use host bind mounts:
 
 ```text
-/opt/app/logs/application.log
+./data/quarkus-gatelink-webpush-server/logs -> /opt/app/logs
+./data/quarkus-gatelink-webpush-server/tmp  -> /opt/app/tmp
 ```
 
-File logging rotates at 50 MB, retains 10 backups and compresses rotated files.
-
-View logs:
+Follow logs:
 
 ```bash
-docker compose logs -f quarkus-gatelink-webpush-server
-tail -f quarkus-gatelink-webpush-server/runtime/logs/application.log
+docker compose -f docker-compose.yml logs -f quarkus-gatelink-webpush-server
+tail -f data/quarkus-gatelink-webpush-server/logs/application.log
 ```
 
-## 16. Security properties
+## Stop and update
 
-Server:
-
-- runtime image `eclipse-temurin:21-jre-noble`;
-- non-root `10001:10001`;
-- `no-new-privileges:true`;
-- no Docker socket mount;
-- external application config mounted read-only;
-- VAPID/database secrets supplied by environment/secret source;
-- HTTP 8080 and HTTPS 8443 are deliberately published per the requested operations standard.
-
-UI:
-
-- Angular is compiled before runtime;
-- runtime does not contain Node build tooling;
-- normal browser traffic is HTTPS 443;
-- HTTP 80 redirects to HTTPS;
-- `/api/` uses encrypted HTTPS to the Quarkus container.
-
-Self-signed mode provides encryption but not public trust. Replace it with certificates issued by an organizational/public CA when appropriate.
-
-## 17. Stop the stack
-
-Preserve all named volumes:
+Stop while preserving named volumes:
 
 ```bash
-docker compose down
+docker compose -f docker-compose.yml down
 ```
 
-Do **not** routinely run:
+Do not routinely add `-v`; that removes PostgreSQL and TLS volumes.
+
+Update only the server:
 
 ```bash
-docker compose down -v
+docker compose -f docker-compose.yml build quarkus-gatelink-webpush-server
+docker compose -f docker-compose.yml up -d --no-deps quarkus-gatelink-webpush-server
 ```
 
-because `-v` deletes PostgreSQL data and generated TLS material.
-
-## 18. Update only the server
+If only `quarkus-gatelink-webpush-server/application.properties` changes:
 
 ```bash
-docker compose build quarkus-gatelink-webpush-server
-docker compose up -d --no-deps quarkus-gatelink-webpush-server
-docker compose ps quarkus-gatelink-webpush-server
+docker compose -f docker-compose.yml restart quarkus-gatelink-webpush-server
 ```
 
-If only `deploy/server/application.properties` changes:
+Update only the UI/proxy:
 
 ```bash
-docker compose restart quarkus-gatelink-webpush-server
+docker compose -f docker-compose.yml build quarkus-gatelink-webpush-ui
+docker compose -f docker-compose.yml up -d --no-deps quarkus-gatelink-webpush-ui
 ```
 
-## 19. Update only the UI
+If only `config/nginx.conf` changes, the bind mount already exposes the new file; reload or restart the UI container:
 
 ```bash
-docker compose build quarkus-gatelink-webpush-ui
-docker compose up -d --no-deps quarkus-gatelink-webpush-ui
-docker compose ps quarkus-gatelink-webpush-ui
+docker compose -f docker-compose.yml restart quarkus-gatelink-webpush-ui
 ```
 
-## 20. Full update
+## Release bundle
 
-```bash
-docker compose build
-docker compose up -d --wait
-docker compose ps
-```
+The release workflow does not keep a second source topology under `deploy/`.
 
-## 21. Useful operational commands
-
-```bash
-# Validate the resolved Compose model
-docker compose config
-
-# Status
-docker compose ps
-
-# All logs
-docker compose logs -f
-
-# Server logs
-docker compose logs -f quarkus-gatelink-webpush-server
-
-# UI logs
-docker compose logs -f quarkus-gatelink-webpush-ui
-
-# psql without publishing 5432
-docker compose exec postgres \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-
-# Server health from inside the container over HTTPS
-docker compose exec quarkus-gatelink-webpush-server \
-  curl -kfsS https://127.0.0.1:8443/q/health/ready
-
-# Inspect generated certificates
-docker compose exec quarkus-gatelink-webpush-server \
-  openssl x509 -in /opt/app/tls/tls.crt -noout -subject -issuer -dates -ext subjectAltName
-
-docker compose exec quarkus-gatelink-webpush-ui \
-  openssl x509 -in /etc/nginx/tls/tls.crt -noout -subject -issuer -dates -ext subjectAltName
-```
-
-## 22. Persistence matrix
-
-| Data | Mechanism | Survives container/image replacement? |
-| --- | --- | --- |
-| browser subscriptions | `postgres_data` named volume | yes |
-| UI TLS certificate/key | `ui_tls` named volume | yes |
-| server TLS certificate/key | `server_tls` named volume | yes |
-| server application logs | source Compose bind mount; Release bundle uses named volume | yes |
-| server temp files | source Compose bind mount; Release bundle uses named volume | yes |
-| external Quarkus config | `deploy/server/application.properties` | yes |
-| Quarkus JAR | server image | replaced with image |
-| Angular application | UI image | replaced with image |
-| VAPID identity | external env/secret source | must remain stable in production |
-
-## 23. Ready-to-run GitHub Release bundle
-
-GitHub Releases contain a Compose archive with:
+Instead it assembles a ready-to-run bundle at release time with the same shape:
 
 ```text
-gatelink-compose-<version>/
-├── compose.yaml
+quarkus-gatelink-webpush-compose-<version>/
+├── docker-compose.yml
 ├── .env.example
 ├── README.md
-├── server/
+├── config/
+│   └── nginx.conf
+├── data/
+│   └── quarkus-gatelink-webpush-server/
+│       ├── logs/
+│       └── tmp/
+├── quarkus-gatelink-webpush-server/
 │   ├── app.jar
 │   ├── application.properties
 │   ├── Dockerfile
 │   └── docker-entrypoint.sh
-└── ui/
-    ├── dist/
-    ├── nginx.conf
+└── quarkus-gatelink-webpush-ui/
     ├── Dockerfile
-    └── docker-entrypoint.sh
+    ├── docker-entrypoint.sh
+    └── dist/
 ```
 
-The target machine needs Docker and Docker Compose only. Maven and Node.js are not needed.
-
-Start a release bundle with:
-
-```bash
-cp .env.example .env
-# edit secrets / TLS SANs
-docker compose up -d --build --wait
-```
-
-The release workflow smoke-tests the generated archive using the same HTTP/HTTPS ports, service names, DNS resolution and certificate generation described in this document.
-
-## 24. Deployment checklist
-
-Before exposing a deployment, verify:
-
-- Docker/Compose resolves `quarkus-gatelink-webpush-server` from the UI container;
-- UI HTTPS `443` works;
-- UI HTTP `80` redirects to HTTPS;
-- `/api/...` reaches Quarkus through `https://quarkus-gatelink-webpush-server:8443/`;
-- direct Quarkus `8080` and `8443` behave as intended for the environment;
-- `UI_TLS_SAN` contains the browser-facing hostname/IP;
-- `SERVER_TLS_SAN` contains any hostname/IP used for direct TLS access plus the internal server DNS name;
-- the self-signed UI certificate has been explicitly trusted/accepted, or replaced by a trusted certificate;
-- production VAPID keys are stable;
-- `POSTGRES_PASSWORD` is changed;
-- OIDC is enabled/configured before protected administrative endpoints are exposed;
-- PostgreSQL port 5432 is not published;
-- no private TLS key or other secret is committed to the repository;
-- backups exist before database/application upgrades.
+The target host needs Docker/Compose only; it does not need Maven or Node.js.

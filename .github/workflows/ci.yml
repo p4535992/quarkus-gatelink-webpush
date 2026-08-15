@@ -26,6 +26,7 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -41,59 +42,57 @@ jobs:
         run: mvn -B -f quarkus-gatelink-webpush-server/pom.xml clean verify
 
       - name: Validate Docker Compose configuration
-        run: docker compose --env-file .env.example config --quiet
+        run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
 
       - name: Build production container images
-        run: docker compose --env-file .env.example build quarkus-gatelink-webpush-server quarkus-gatelink-webpush-ui
+        run: >-
+          docker compose --env-file .env.example -f docker-compose.yml
+          build quarkus-gatelink-webpush-server quarkus-gatelink-webpush-ui
 
-      - name: Prepare server bind-mount permissions
+      - name: Prepare server data permissions
         run: |
-          sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/logs
-          sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/tmp
+          sudo chown -R 10001:10001 data/quarkus-gatelink-webpush-server/logs
+          sudo chown -R 10001:10001 data/quarkus-gatelink-webpush-server/tmp
 
       - name: Smoke test production Compose stack
         run: |
-          docker compose --env-file .env.example up -d --no-build --wait --wait-timeout 120
+          docker compose --env-file .env.example -f docker-compose.yml \
+            up -d --no-build --wait --wait-timeout 120
 
-          # Port 80 is present only as the user-facing HTTP -> HTTPS redirect.
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1/)" = "308"
 
-          # Normal user path: HTTPS 443 -> Nginx -> HTTPS 8443 -> Quarkus.
           curl --fail --insecure --silent --show-error https://127.0.0.1/healthz
           curl --fail --insecure --silent --show-error https://127.0.0.1/api/q/health/ready
           curl --fail --insecure --silent --show-error https://127.0.0.1/dashboard | grep -q '<app-root'
 
-          # Direct Quarkus REST/operations access remains available on both ports.
           curl --fail --silent --show-error http://127.0.0.1:8080/q/health/ready
           curl --fail --insecure --silent --show-error https://127.0.0.1:8443/q/health/ready
 
-          # Requested fixed service/container/hostname identity.
           test "$(docker inspect -f '{{.Name}}' quarkus-gatelink-webpush-server)" = '/quarkus-gatelink-webpush-server'
           test "$(docker inspect -f '{{.Config.Hostname}}' quarkus-gatelink-webpush-server)" = 'quarkus-gatelink-webpush-server'
           test "$(docker inspect -f '{{.Name}}' quarkus-gatelink-webpush-ui)" = '/quarkus-gatelink-webpush-ui'
           test "$(docker inspect -f '{{.Config.Hostname}}' quarkus-gatelink-webpush-ui)" = 'quarkus-gatelink-webpush-ui'
 
-          # Verify Nginx can resolve the server by the internal Docker DNS name.
-          docker compose --env-file .env.example exec -T quarkus-gatelink-webpush-ui \
-            getent hosts quarkus-gatelink-webpush-server
+          docker compose --env-file .env.example -f docker-compose.yml \
+            exec -T quarkus-gatelink-webpush-ui getent hosts quarkus-gatelink-webpush-server
 
-          # Server stays non-root and both generated TLS files exist.
-          docker compose --env-file .env.example exec -T quarkus-gatelink-webpush-server \
+          docker compose --env-file .env.example -f docker-compose.yml \
+            exec -T quarkus-gatelink-webpush-server \
             sh -c 'test "$(id -u)" = "10001" && test -w /opt/app/logs && test -w /opt/app/tmp && test -s /opt/app/tls/tls.crt && test -s /opt/app/tls/tls.key'
 
-          # UI self-signed certificate/key must also exist.
-          docker compose --env-file .env.example exec -T quarkus-gatelink-webpush-ui \
+          docker compose --env-file .env.example -f docker-compose.yml \
+            exec -T quarkus-gatelink-webpush-ui \
             sh -c 'test -s /etc/nginx/tls/tls.crt && test -s /etc/nginx/tls/tls.key'
 
-          test -f quarkus-gatelink-webpush-server/runtime/logs/application.log
-          docker compose --env-file .env.example ps
+          test -f data/quarkus-gatelink-webpush-server/logs/application.log
+          docker compose --env-file .env.example -f docker-compose.yml ps
 
       - name: Print Compose diagnostics on failure
         if: failure()
         run: |
-          docker compose --env-file .env.example ps -a || true
-          docker compose --env-file .env.example logs --no-color --tail=300 || true
+          docker compose --env-file .env.example -f docker-compose.yml ps -a || true
+          docker compose --env-file .env.example -f docker-compose.yml logs --no-color --tail=300 || true
 
       - name: Stop production Compose stack
         if: always()
-        run: docker compose --env-file .env.example down -v --remove-orphans
+        run: docker compose --env-file .env.example -f docker-compose.yml down -v --remove-orphans
