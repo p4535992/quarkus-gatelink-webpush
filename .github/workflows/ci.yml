@@ -29,15 +29,41 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
       - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
+
       - name: Build and test GateLink server
         run: mvn -B -f quarkus-gatelink-server/pom.xml clean verify
+
       - name: Validate Docker Compose configuration
         run: docker compose --env-file .env.example config --quiet
+
       - name: Build production container images
         run: docker compose --env-file .env.example build backend frontend
+
+      - name: Prepare backend bind-mount permissions
+        run: |
+          sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/logs
+          sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/tmp
+
+      - name: Smoke test production Compose stack
+        run: |
+          docker compose --env-file .env.example up -d --no-build --wait --wait-timeout 120
+          curl --fail --silent --show-error http://127.0.0.1:8081/healthz
+          curl --fail --silent --show-error http://127.0.0.1:8081/api/q/health/ready
+          docker compose --env-file .env.example ps
+
+      - name: Print Compose diagnostics on failure
+        if: failure()
+        run: |
+          docker compose --env-file .env.example ps -a || true
+          docker compose --env-file .env.example logs --no-color --tail=300 || true
+
+      - name: Stop production Compose stack
+        if: always()
+        run: docker compose --env-file .env.example down -v --remove-orphans
