@@ -4,11 +4,12 @@ import { SwPush } from '@angular/service-worker';
 import { firstValueFrom } from 'rxjs';
 
 /**
- * Configure this token in app.config.ts for each environment.
+ * Same-origin default for the production Nginx reverse proxy. Override this
+ * token only when integrating GateLink behind a different gateway/path.
  */
 export const GATELINK_WEBPUSH_BASE_URL = new InjectionToken<string>(
   'GATELINK_WEBPUSH_BASE_URL',
-  { providedIn: 'root', factory: () => 'http://localhost:8080' },
+  { providedIn: 'root', factory: () => '/api' },
 );
 
 @Injectable({ providedIn: 'root' })
