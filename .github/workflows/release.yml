@@ -9,6 +9,18 @@ on:
         description: Optional version label for a manual packaging test (for example 1.0.0-test)
         required: false
         type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'deploy/release/**'
+      - 'deploy/backend/application.properties'
+      - '.env.example'
+      - 'quarkus-gatelink-server/Dockerfile'
+      - 'quarkus-gatelink-webpush-ui/Dockerfile'
+      - 'quarkus-gatelink-webpush-ui/nginx.conf'
+      - 'quarkus-gatelink-webpush-ui/angular.json'
+      - 'quarkus-gatelink-webpush-ui/package.json'
 
 permissions:
   contents: write
