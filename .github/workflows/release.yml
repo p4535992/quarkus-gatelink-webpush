@@ -113,11 +113,12 @@ jobs:
           set -euo pipefail
 
           VERSION='${{ steps.meta.outputs.version }}'
+          PROJECT_NAME="quarkus-gatelink-webpush"
           OUT="${GITHUB_WORKSPACE}/release-out"
           STAGE="${GITHUB_WORKSPACE}/release-stage"
-          SERVER_NAME="quarkus-gatelink-webpush-server-${VERSION}"
-          UI_NAME="gatelink-webpush-ui-${VERSION}"
-          COMPOSE_NAME="gatelink-compose-${VERSION}"
+          SERVER_NAME="${PROJECT_NAME}-server-${VERSION}"
+          UI_NAME="${PROJECT_NAME}-ui-${VERSION}"
+          COMPOSE_NAME="${PROJECT_NAME}-compose-${VERSION}"
           UI_DIR="${STAGE}/${UI_NAME}"
           BUNDLE="${STAGE}/${COMPOSE_NAME}"
 
@@ -150,7 +151,7 @@ jobs:
           set -euo pipefail
 
           VERSION='${{ steps.meta.outputs.version }}'
-          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/quarkus-gatelink-webpush-compose-${VERSION}"
 
           docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" build \
             quarkus-gatelink-webpush-server quarkus-gatelink-webpush-ui
@@ -185,7 +186,7 @@ jobs:
         shell: bash
         run: |
           VERSION='${{ steps.meta.outputs.version }}'
-          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/quarkus-gatelink-webpush-compose-${VERSION}"
           if [[ -f "${BUNDLE}/compose.yaml" ]]; then
             docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" ps -a || true
             docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" logs --no-color --tail=300 || true
@@ -196,7 +197,7 @@ jobs:
         shell: bash
         run: |
           VERSION='${{ steps.meta.outputs.version }}'
-          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/quarkus-gatelink-webpush-compose-${VERSION}"
           if [[ -f "${BUNDLE}/compose.yaml" ]]; then
             docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" down -v --remove-orphans || true
           fi
@@ -207,11 +208,12 @@ jobs:
           set -euo pipefail
 
           VERSION='${{ steps.meta.outputs.version }}'
+          PROJECT_NAME="quarkus-gatelink-webpush"
           OUT="${GITHUB_WORKSPACE}/release-out"
           STAGE="${GITHUB_WORKSPACE}/release-stage"
-          SERVER_NAME="quarkus-gatelink-webpush-server-${VERSION}"
-          UI_NAME="gatelink-webpush-ui-${VERSION}"
-          COMPOSE_NAME="gatelink-compose-${VERSION}"
+          SERVER_NAME="${PROJECT_NAME}-server-${VERSION}"
+          UI_NAME="${PROJECT_NAME}-ui-${VERSION}"
+          COMPOSE_NAME="${PROJECT_NAME}-compose-${VERSION}"
 
           (
             cd "${STAGE}"
@@ -237,7 +239,7 @@ jobs:
       - name: Keep artifacts for manual runs and diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: gatelink-release-${{ steps.meta.outputs.version }}
+          name: quarkus-gatelink-webpush-release-${{ steps.meta.outputs.version }}
           path: release-out/*
           if-no-files-found: error
           compression-level: 0
@@ -255,15 +257,15 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## GateLink release artifacts'
+            echo '## Quarkus GateLink Web Push release artifacts'
             echo
             echo 'Version: `${{ steps.meta.outputs.version }}`'
             echo
             echo 'Generated:'
-            echo '- Quarkus webpush server uber-JAR'
-            echo '- Angular production ZIP'
-            echo '- Angular production TAR.GZ'
-            echo '- HTTPS-ready Docker Compose ZIP'
-            echo '- HTTPS-ready Docker Compose TAR.GZ'
-            echo '- SHA256SUMS'
+            echo '- `quarkus-gatelink-webpush-server-${{ steps.meta.outputs.version }}.jar`'
+            echo '- `quarkus-gatelink-webpush-ui-${{ steps.meta.outputs.version }}.zip`'
+            echo '- `quarkus-gatelink-webpush-ui-${{ steps.meta.outputs.version }}.tar.gz`'
+            echo '- `quarkus-gatelink-webpush-compose-${{ steps.meta.outputs.version }}.zip`'
+            echo '- `quarkus-gatelink-webpush-compose-${{ steps.meta.outputs.version }}.tar.gz`'
+            echo '- `SHA256SUMS`'
           } >> "${GITHUB_STEP_SUMMARY}"
