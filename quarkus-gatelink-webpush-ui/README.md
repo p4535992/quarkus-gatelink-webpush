@@ -1,318 +1,273 @@
 # `quarkus-gatelink-webpush-ui`
 
-This folder contains the browser side of GateLink.
+This folder is the production Angular + TypeScript frontend for GateLink.
 
-The framework-free demo lives under `src/`. Framework examples live under `examples/`, including Angular + TypeScript.
+It is built during the Docker image build and served by Nginx. Production does **not** use `ng serve` or BrowserSync.
 
-> For the complete operator-oriented user → browser → GateLink → PostgreSQL → Push Service → Service Worker flow, see [`../docs/operator-guide.md`](../docs/operator-guide.md).
+See also:
 
-## What the browser side is responsible for
+- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) for Docker/Nginx deployment;
+- [`../docs/operator-guide.md`](../docs/operator-guide.md) for the complete Web Push lifecycle.
 
-The browser application:
-
-- registers the Service Worker;
-- asks the user for notification permission;
-- obtains the GateLink public VAPID key;
-- asks the browser Push API to create a PushSubscription;
-- sends that PushSubscription to GateLink;
-- removes its GateLink subscription record when unsubscribing;
-- receives final push events in the Service Worker;
-- displays or handles the browser notification.
-
-The browser never receives the VAPID private key.
-
-## Browser-side architecture
+## Runtime architecture
 
 ```text
-+---------+
-| User    |
-+----+----+
-     |
-     | subscribe / interact
-     v
-+----+--------------------------------------+
-| Browser + GateLink UI                    |
-|                                           |
-| page / Angular component                  |
-| Push API / PushManager / SwPush           |
-| Service Worker                            |
-+-----------+--------------------+----------+
-            |                    |
-            | GateLink REST      | browser-native Push API
-            v                    v
-+-----------+----------+   +-----+----------------------+
-| GateLink server      |   | Browser vendor Push Service|
-| Java / Quarkus       |   | FCM / Mozilla / vendor    |
-+-----------+----------+   +-----+----------------------+
-            |                    |
-            | PostgreSQL         | later push delivery
-            v                    v
-      +-----+------+       +-----+----------------+
-      | subscription|       | Browser Service Worker|
-      | persistence |       +----------------------+
-      +-------------+
-```
-
-There are two different network relationships:
-
-1. the browser UI calls **GateLink** for application REST APIs;
-2. the browser Push API talks to the browser vendor **Push Service** to create and maintain the browser subscription.
-
-## Subscribe: step by step
-
-```text
-User
-  |
-  | clicks Subscribe
-  v
-Browser UI
-  |
-  +-- ensure Service Worker is registered/ready
-  |
-  +-- GET /keys/public ---------------------------> GateLink
-  |                                                   |
-  |<---------------- public VAPID key ----------------+
-  |
-  +-- request notification permission
-  |
-  +-- PushManager.subscribe / SwPush.requestSubscription
-  |             |
-  |             v
-  |       Browser Push Service
-  |             |
-  |<----- PushSubscription(endpoint, p256dh, auth)
-  |
-  +-- POST /subscriptions ------------------------> GateLink
-                                                      |
-                                                      +--> validate
-                                                      +--> PostgreSQL upsert
-```
-
-Exact browser sequence:
-
-1. User opens the application.
-2. The application registers the Service Worker.
-3. User chooses to enable notifications.
-4. UI calls `GET /keys/public` on GateLink.
-5. GateLink returns its public VAPID application-server key.
-6. The UI converts that key to the representation required by the browser/framework if necessary.
-7. The browser requests notification permission if needed.
-8. The UI calls the browser Push API with `userVisibleOnly: true` and the GateLink public VAPID key.
-9. The browser itself contacts its vendor Push Service.
-10. The Push Service returns a browser PushSubscription.
-11. The subscription contains:
-    - `endpoint` — vendor Push Service URL;
-    - `p256dh` — browser public encryption key;
-    - `auth` — browser Web Push auth secret.
-12. The UI serializes the subscription.
-13. The UI calls `POST /subscriptions` on GateLink.
-14. GateLink validates and persists the subscription in PostgreSQL.
-15. GateLink returns HTTP `204` for a valid registration.
-16. The browser is now registered both with its vendor Push Service and with GateLink's database.
-
-These are separate pieces of state:
-
-```text
-Browser / Push Service subscription
-        !=
-GateLink PostgreSQL record
-```
-
-The frontend is responsible for keeping its browser subscription lifecycle aligned with GateLink registration/unregistration.
-
-## Notification receive flow: step by step
-
-The browser is not called directly by GateLink.
-
-```text
-GateLink
-   |
-   | encrypted RFC 8030 Web Push request
-   v
-Browser Push Service
-   |
-   | vendor-specific delivery
-   v
 Browser
    |
-   | push event
+   | http(s)://frontend/
    v
-Service Worker
+Nginx :80
    |
-   | process payload
-   | show notification
-   v
-User
+   +-- Angular static files
+   |
+   `-- /api/* -----------------> backend:8080
+                                  Quarkus
 ```
 
-Exact sequence after the server sends:
+The browser never uses Docker service names. It only talks to the same origin that served Angular.
 
-1. GateLink POSTs the encrypted message to the subscription endpoint.
-2. The vendor Push Service accepts or rejects the request.
-3. If accepted, the Push Service later delivers the message to the browser.
-4. The browser wakes/routes the event to the registered Service Worker.
-5. The Service Worker receives the `push` event.
-6. The Service Worker reads the payload.
-7. The Service Worker displays a user-visible notification or performs the configured push handling.
-8. If the user clicks the notification, the Service Worker handles `notificationclick` / framework-specific click events.
-
-A successful GateLink request does not mean the user has seen the notification; GateLink only knows about acceptance by the Push Service.
-
-## Unsubscribe: step by step
+Angular calls GateLink through:
 
 ```text
-Browser UI
-    |
-    | current PushSubscription.endpoint
-    |
-    +-- Base64URL encode endpoint
-    |
-    +-- DELETE /subscriptions/{encodedEndpoint} ---> GateLink
-    |                                                   |
-    |                                                   `--> PostgreSQL delete
-    |
-    `-- browser Push API unsubscribe
+/api
 ```
 
-1. UI obtains the current PushSubscription.
-2. UI Base64URL-encodes its endpoint for the GateLink path parameter.
-3. UI calls `DELETE /subscriptions/{encodedEndpoint}`.
-4. GateLink removes the durable database record.
-5. UI also performs the browser Push API unsubscribe lifecycle where appropriate.
-6. Removing the PostgreSQL record alone does not magically cancel browser-vendor subscription state.
+Nginx resolves the Compose hostname `backend` and removes the `/api/` prefix before proxying.
 
-## REST calls made by the frontend
+Example:
 
-| Browser action | GateLink request | Authentication |
-| --- | --- | --- |
-| load application-server public key | `GET /keys/public` | public |
-| register/update subscription | `POST /subscriptions` | public + validation |
-| remove known subscription | `DELETE /subscriptions/{base64urlEndpoint}` | public + path validation |
+```text
+Browser:  /api/keys/public
+Nginx:    http://backend:8080/keys/public
+Quarkus:  GET /keys/public
+```
 
-Administrative calls such as listing all subscriptions or sending notifications are not frontend responsibilities and require OIDC `gatelink-admin`.
+## Angular stack
 
-## Framework-free demo
+The frontend uses:
+
+- Angular 22;
+- TypeScript 6;
+- Angular Router;
+- Angular `HttpClient`;
+- Angular Service Worker / `SwPush`;
+- production AOT/build output;
+- Nginx runtime.
 
 Important files:
 
-| File / folder | Responsibility |
-| --- | --- |
-| `src/index.html` | browser entry page |
-| `src/app.js` | application bootstrap |
-| `src/app/control/MicroService.js` | GateLink `fetch` wrapper |
-| `src/subscription/control/SubscriptionService.js` | subscribe/unsubscribe orchestration |
-| `src/push-worker.js` | Service Worker receiving push events |
-| `src/notifications/` | notification UI/control code |
-| `src/subscription/` | subscription UI/control/entity code |
+```text
+Dockerfile
+nginx.conf
+package.json
+angular.json
+tsconfig.json
+tsconfig.app.json
+ngsw-config.json
+src/
+├── index.html
+├── main.ts
+├── style.css
+└── app/
+    ├── app.component.ts
+    ├── app.config.ts
+    ├── app.routes.ts
+    ├── gatelink-webpush.service.ts
+    └── push-page.component.ts
+```
 
-Default GateLink backend:
+## Docker build
 
 ```text
-http://localhost:8080
+node:24.18.0-bookworm-slim
+        |
+        | npm install
+        | ng build --configuration production
+        v
+dist/gatelink-webpush-ui/browser
+        |
+        v
+nginx:1.28.3-alpine
+        |
+        v
+/usr/share/nginx/html
 ```
 
-Override it before loading modules:
-
-```html
-<script>
-  globalThis.GATELINK_BASE_URI = 'https://gatelink.example.com';
-</script>
-```
-
-Run the demo:
+Build only this image from the repository root:
 
 ```bash
-npm install -g browser-sync
-./startBrowserSync.sh
+docker compose build frontend
 ```
 
-Keep `quarkus-gatelink-server` running separately.
+Run/update only this service:
 
-## Angular + TypeScript
+```bash
+docker compose up -d --no-deps frontend
+```
 
-Example files:
+## Browser subscription flow
+
+```text
+User
+  |
+  | Subscribe
+  v
+Angular
+  |
+  | GET /api/keys/public
+  v
+Nginx
+  |
+  | GET /keys/public
+  v
+GateLink
+  |
+  | public VAPID key
+  v
+Angular SwPush
+  |
+  | requestSubscription
+  v
+Browser Push Service
+  |
+  | PushSubscription(endpoint, p256dh, auth)
+  v
+Angular
+  |
+  | POST /api/subscriptions
+  v
+GateLink -> PostgreSQL
+```
+
+The frontend never receives the VAPID private key.
+
+## `GateLinkWebPushService`
+
+The production Angular service uses a fixed same-origin base:
+
+```ts
+private readonly baseUrl = '/api';
+```
+
+Subscription sequence:
+
+1. verify Angular Service Worker / Push API availability;
+2. reuse an existing subscription if one already exists;
+3. request `/api/keys/public`;
+4. call `SwPush.requestSubscription({ serverPublicKey })`;
+5. POST `subscription.toJSON()` to `/api/subscriptions`.
+
+Unsubscribe sequence:
+
+1. obtain current browser subscription;
+2. Base64URL-encode the Push Service endpoint;
+3. DELETE `/api/subscriptions/{encodedEndpoint}`;
+4. only after server-side removal succeeds, call `SwPush.unsubscribe()`.
+
+That order prevents silently losing the browser-side reference while GateLink still believes the endpoint is registered.
+
+## Service Worker and HTTPS
+
+Angular Service Worker is enabled in production builds.
+
+Browser Push API and Service Workers require a secure context. Therefore:
+
+```text
+http://localhost     suitable for local development
+https://...          required for real production browser use
+```
+
+The Compose Nginx image serves HTTP directly; a real deployment should terminate TLS either in Nginx with deployment-specific certificates or, more commonly, at an upstream ingress/reverse proxy/load balancer.
+
+## Nginx API proxy
+
+The relevant configuration is:
+
+```nginx
+location /api/ {
+    proxy_pass http://backend:8080/;
+}
+```
+
+The slash after `8080/` is intentional. It replaces the matching `/api/` prefix.
+
+```text
+/api/subscriptions -> /subscriptions
+/api/q/health      -> /q/health
+```
+
+The proxy also forwards:
+
+```text
+Host
+X-Real-IP
+X-Forwarded-For
+X-Forwarded-Proto
+```
+
+`/api` without a trailing slash receives a redirect to `/api/`, so it cannot fall into Angular routing.
+
+## Angular SPA routing
+
+Nginx uses:
+
+```nginx
+location / {
+    try_files $uri $uri/ /index.html;
+}
+```
+
+Therefore direct refreshes of routes such as:
+
+```text
+/dashboard
+/settings
+```
+
+return Angular `index.html` rather than Nginx 404.
+
+The `/api/` location is handled separately and is not affected by the SPA fallback.
+
+## Frontend healthcheck
+
+Nginx exposes:
+
+```text
+GET /healthz
+```
+
+which returns HTTP 200 and `ok`.
+
+Compose checks this endpoint locally inside the frontend container.
+
+## Local Angular development
+
+For frontend-only development you can still run:
+
+```bash
+npm install
+npm start
+```
+
+However the production architecture is the Docker/Nginx path. A local `ng serve` session needs its own development proxy configuration or an alternate API arrangement; it does not use Docker DNS hostname `backend` directly from the browser.
+
+## Integration examples
+
+Copy-ready framework examples remain under:
 
 ```text
 examples/angular-typescript/
-├── README.md
-├── gatelink-webpush.service.ts
-├── push-demo.component.ts
-└── app.config.example.ts
 ```
 
-Core Angular responsibilities:
+The example service now also defaults to `/api`, matching the production Nginx layout.
 
-```text
-HttpClient
-   +---- GET /keys/public
-   +---- POST /subscriptions
-   +---- DELETE /subscriptions/{endpoint}
+## Security rules
 
-SwPush
-   +---- requestSubscription({ serverPublicKey })
-   +---- subscription
-   +---- unsubscribe()
-   +---- messages
-   `---- notificationClicks
-```
-
-A typical Angular subscription sequence is:
-
-```ts
-const serverPublicKey = await firstValueFrom(
-  http.get(`${baseUrl}/keys/public`, { responseType: 'text' }),
-);
-
-const subscription = await swPush.requestSubscription({
-  serverPublicKey: serverPublicKey.trim(),
-});
-
-await firstValueFrom(
-  http.post(`${baseUrl}/subscriptions`, subscription.toJSON()),
-);
-```
-
-## What must never be in frontend code
-
-Do not put any of the following into the browser bundle:
+Never put these in Angular source, runtime config downloaded by the browser, or generated bundles:
 
 - VAPID private key;
-- production database credentials;
-- OIDC client secrets intended for confidential server applications;
-- PostgreSQL subscription data for other users.
+- PostgreSQL credentials;
+- confidential OIDC client secrets;
+- other users' stored PushSubscription secrets.
 
-The browser only needs the **public** VAPID key.
-
-## Secure-context requirement
-
-Service Workers and the Push API require a secure browser context.
-
-Use HTTPS in production. Browsers normally treat `http://localhost` as a trustworthy development origin.
-
-## Current Web Push protocol
-
-The browser-facing application participates in the current standardized flow only:
-
-```text
-PushSubscription
-      |
-      v
-GateLink
-      |
-      | AES128GCM encrypted payload
-      | RFC 8292 VAPID
-      v
-Push Service
-      |
-      v
-Service Worker
-```
-
-There is no GateLink legacy `aesgcm` compatibility layer.
-
-## Related documentation
-
-- [`../docs/operator-guide.md`](../docs/operator-guide.md) — complete end-to-end operational lifecycle.
-- [`../docs/integration-examples.md`](../docs/integration-examples.md) — Java and TypeScript integration examples.
-- [`../quarkus-gatelink-server/README.md`](../quarkus-gatelink-server/README.md) — server-side handling.
-- [`../README.md`](../README.md) — repository overview and quick start.
+The browser only needs the public VAPID key returned by GateLink.
