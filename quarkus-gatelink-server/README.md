@@ -2,7 +2,11 @@
 
 This is the single Java 21 / Quarkus backend project. It contains production code and all Java tests.
 
-> For the complete user → browser → GateLink → PostgreSQL → Push Service → Service Worker lifecycle, see [`../docs/operator-guide.md`](../docs/operator-guide.md).
+Start with:
+
+- [`../docs/operator-guide.md`](../docs/operator-guide.md) for the complete user → browser → GateLink → PostgreSQL → Push Service lifecycle;
+- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) for the Docker/Compose deployment;
+- [`../docs/webpush-java.md`](../docs/webpush-java.md) for the selected Java Web Push library.
 
 ## Server responsibilities
 
@@ -13,7 +17,7 @@ GateLink server is responsible for:
 - validating browser PushSubscription input;
 - persisting subscriptions in PostgreSQL;
 - loading subscriptions for notification fan-out;
-- delegating RFC 8291 / RFC 8188 payload encryption to the Java `nl.martijndwars:web-push` library;
+- delegating RFC 8291 / RFC 8188 payload encryption to `nl.martijndwars:web-push`;
 - creating RFC 8292 VAPID authentication;
 - sending RFC 8030 requests to browser Push Service endpoints;
 - enforcing OIDC/RBAC and notification rate limits;
@@ -53,29 +57,154 @@ PostgreSQL                  AES128GCM body
                            Browser Push Service
 ```
 
+## Docker runtime
+
+The production runtime image is based on:
+
+```text
+eclipse-temurin:21-jre-noble
+```
+
+No Red Hat UBI or Podman-specific base image is used.
+
+The Maven project is packaged as a Quarkus uber-JAR with final artifact name `app`. The Docker build copies it into the runtime image as:
+
+```text
+/opt/app/app.jar
+```
+
+The Java process starts as:
+
+```text
+java -jar /opt/app/app.jar
+```
+
+The runtime process is non-root:
+
+```text
+UID 10001
+GID 10001
+```
+
+`JAVA_TOOL_OPTIONS` sets:
+
+```text
+-Djava.io.tmpdir=/opt/app/tmp
+-Djava.util.logging.manager=org.jboss.logmanager.LogManager
+```
+
+Runtime paths:
+
+```text
+/opt/app/app.jar                         image content
+/opt/app/config/application.properties  read-only bind mount
+/opt/app/logs/                           writable bind mount
+/opt/app/tmp/                            writable bind mount
+```
+
+The Dockerfile is at:
+
+```text
+quarkus-gatelink-server/Dockerfile
+```
+
+Build only the backend image from the repository root:
+
+```bash
+docker compose build backend
+```
+
+Run/update only the backend while preserving PostgreSQL and frontend containers:
+
+```bash
+docker compose up -d --no-deps backend
+```
+
+See [`../docs/docker-deployment.md`](../docs/docker-deployment.md) for host ownership/permissions and the complete procedure.
+
+## External Quarkus configuration
+
+The production Compose stack bind-mounts:
+
+```text
+./quarkus-gatelink-server/config/application.properties
+```
+
+as:
+
+```text
+/opt/app/config/application.properties
+```
+
+in read-only mode.
+
+Because the container uses `WORKDIR /opt/app`, this is the standard Quarkus external configuration location:
+
+```text
+$PWD/config/application.properties
+```
+
+The runtime configuration can therefore be changed without rebuilding the application image. Restart the backend after changing the file:
+
+```bash
+docker compose restart backend
+```
+
+Secrets are not written into this properties file. Compose injects them through environment variables.
+
+## PostgreSQL connection in Docker
+
+Inside Compose, GateLink reaches PostgreSQL using the service DNS name:
+
+```text
+jdbc:postgresql://postgres:5432/${DB_NAME}
+```
+
+It must **not** use `localhost` for the database from inside the backend container.
+
+The relevant environment variables are:
+
+```text
+DB_NAME
+DB_USER
+DB_PASSWORD
+```
+
+which Compose derives from:
+
+```text
+POSTGRES_DB
+POSTGRES_USER
+POSTGRES_PASSWORD
+```
+
+PostgreSQL is not exposed on an application host port in the production-style stack.
+
 ## Startup: what the server does
 
-1. Quarkus creates the PostgreSQL datasource.
-2. Flyway validates and applies pending migrations.
-3. Hibernate validates the Java mappings against the schema.
-4. `InMemoryKeyStore` initializes the VAPID identity.
-5. If both VAPID keys are configured, GateLink loads the stable P-256 pair.
-6. If only one key is configured, startup fails.
-7. If neither key is configured, GateLink generates a temporary pair and logs a warning.
-8. Quarkus initializes OIDC security.
-9. Hibernate Validator becomes active on REST parameters/entities.
-10. Micrometer and OpenTelemetry instrumentation are initialized.
-11. GateLink starts accepting HTTP requests.
+1. Docker Compose waits until PostgreSQL passes `pg_isready`.
+2. The backend container starts.
+3. Quarkus creates the PostgreSQL datasource.
+4. Flyway validates and applies pending migrations.
+5. Hibernate validates the Java mappings against the schema.
+6. `InMemoryKeyStore` initializes the VAPID identity.
+7. If both VAPID keys are configured, GateLink loads the stable P-256 pair.
+8. If only one VAPID key is configured, startup fails.
+9. If neither is configured, GateLink generates a temporary pair and logs a warning.
+10. Quarkus initializes OIDC/security, validation, metrics and tracing.
+11. GateLink exposes the HTTP server on `0.0.0.0:8080`.
+12. Compose waits for `GET /q/health/ready` before starting the frontend.
 
-A production deployment should always use a stable VAPID pair. PostgreSQL persistence alone is not enough if the application-server identity changes after restart.
+A production deployment must always use a stable VAPID pair. PostgreSQL persistence alone is not sufficient if the application-server identity changes after restart.
 
 ## `GET /keys/public`: server-side sequence
 
-1. Browser calls `GET /keys/public`.
-2. `KeysResource` obtains the current `ECKeys` from `InMemoryKeyStore`.
-3. GateLink serializes only the public key.
-4. The public key is returned as unpadded Base64URL text.
-5. The VAPID private key never leaves the server.
+1. Browser calls Nginx at `/api/keys/public` in the Dockerized deployment.
+2. Nginx forwards it to GateLink as `GET /keys/public`.
+3. `KeysResource` obtains the current `ECKeys` from `InMemoryKeyStore`.
+4. GateLink serializes only the public key.
+5. The public key is returned as unpadded Base64URL text.
+6. The VAPID private key never leaves the server.
 
 ## `POST /subscriptions`: server-side sequence
 
@@ -202,27 +331,11 @@ push_subscriptions
 +----------+------+
 ```
 
-The VAPID private key is not stored in this table.
+PostgreSQL answers **who GateLink can send to**. It is not a Web Push message queue, notification history, delivery acknowledgement database or VAPID private-key store.
 
-### Local PostgreSQL
+The Docker named volume `postgres_data` makes this state survive PostgreSQL container replacement.
 
-From repository root:
-
-```bash
-docker compose up -d postgres
-```
-
-Connection:
-
-```text
-host:     localhost
-port:     5432
-database: gatelink
-username: gatelink
-password: gatelink
-```
-
-Inspect subscriptions:
+Inspect subscriptions without publishing port 5432:
 
 ```bash
 docker compose exec postgres psql -U gatelink -d gatelink
@@ -251,7 +364,35 @@ Never rewrite a migration already applied in a deployed environment; add a new v
 | `DELETE` | `/subscriptions` | `gatelink-admin` |
 | `POST` | `/notifications` | `gatelink-admin` + 20/minute rate limit |
 
-The browser-facing endpoints remain public because they are part of subscription lifecycle management. Administrative inventory and fan-out operations require OIDC.
+Through the production Nginx frontend these are exposed with `/api` prefixed, e.g. `/api/subscriptions`.
+
+The browser-facing endpoints remain public because they are part of subscription lifecycle management. Administrative inventory and fan-out operations require OIDC when OIDC is enabled/configured.
+
+## OIDC in the three-container stack
+
+The requested Compose stack contains:
+
+```text
+frontend + backend + postgres
+```
+
+and intentionally does not add a fourth identity-provider container.
+
+`.env.example` therefore leaves OIDC disabled so the stack can boot by itself. This is appropriate only for exercising public browser subscription flows.
+
+For production administrative endpoints configure an external OIDC provider:
+
+```text
+OIDC_ENABLED=true
+OIDC_AUTH_SERVER_URL=https://id.example.com/realms/gatelink
+OIDC_CLIENT_ID=gatelink-server
+```
+
+Administrative tokens must carry role:
+
+```text
+gatelink-admin
+```
 
 ## Unsubscribe handling
 
@@ -260,11 +401,11 @@ The browser-facing endpoints remain public because they are part of subscription
 1. GateLink validates that the path value is non-blank, bounded and Base64URL-shaped.
 2. GateLink decodes it to the original endpoint string.
 3. `SubscriptionsStore.remove(endpoint)` deletes that primary-key row.
-4. This removes GateLink's server-side record; frontend code is separately responsible for the browser Push API subscription lifecycle.
+4. This removes GateLink's server-side record; frontend code separately manages browser Push API subscription state.
 
 `DELETE /subscriptions` is a distinct admin-only operation that deletes every database row.
 
-## Web Push implementation
+## Selected Web Push library
 
 GateLink uses:
 
@@ -299,52 +440,67 @@ Browser Push Service
 
 There is no GateLink path using `Encoding.AESGCM`, and GateLink does not emit legacy `Encryption` / `Crypto-Key` delivery headers.
 
+See [`../docs/webpush-java.md`](../docs/webpush-java.md).
+
 ## VAPID configuration
 
-Production:
+Production Compose configuration comes from `.env` or an equivalent secret/environment source:
 
-```bash
-export WEBPUSH_VAPID_PUBLIC_KEY='...'
-export WEBPUSH_VAPID_PRIVATE_KEY='...'
-export WEBPUSH_VAPID_SUBJECT='mailto:admin@example.com'
+```text
+WEBPUSH_VAPID_PUBLIC_KEY=...
+WEBPUSH_VAPID_PRIVATE_KEY=...
+WEBPUSH_VAPID_SUBJECT=mailto:admin@example.com
 ```
 
 Both public and private key must be provided together.
 
 The VAPID pair identifies the application server and signs RFC 8292 authentication. Payload encryption uses separate ephemeral key agreement inside the Web Push encryption implementation.
 
-## OIDC configuration
+## Logging
 
-Production:
-
-```bash
-export GATELINK_OIDC_AUTH_SERVER_URL='https://id.example.com/realms/gatelink'
-export GATELINK_OIDC_CLIENT_ID='gatelink-server'
-```
-
-Development uses Quarkus OIDC Dev Services when Docker is available. `alice` is assigned `gatelink-admin`.
-
-Tests disable the external OIDC provider and use `quarkus-test-security` identities.
-
-## Datasource configuration
-
-Production:
+The external container configuration keeps console logging enabled, so:
 
 ```bash
-export GATELINK_DB_URL='jdbc:postgresql://postgres.example.internal:5432/gatelink'
-export GATELINK_DB_USER='gatelink'
-export GATELINK_DB_PASSWORD='replace-me'
+docker compose logs -f backend
 ```
 
-Do not reuse development credentials in production.
+shows application output.
 
-## CORS
+GateLink also writes persistent file logs to:
 
-Production origins must be explicit:
-
-```bash
-export QUARKUS_HTTP_CORS_ORIGINS='https://push.example.com'
+```text
+/opt/app/logs/application.log
 ```
+
+which is bound to:
+
+```text
+quarkus-gatelink-server/runtime/logs/application.log
+```
+
+Rotation is configured for:
+
+```text
+50 MB maximum file size
+10 backup files
+compressed date-suffixed rotated files
+```
+
+## Temporary files
+
+`java.io.tmpdir` is:
+
+```text
+/opt/app/tmp
+```
+
+bound to:
+
+```text
+quarkus-gatelink-server/runtime/tmp
+```
+
+The host directories `runtime/logs` and `runtime/tmp` must be writable by `10001:10001`.
 
 ## Observability
 
@@ -352,7 +508,10 @@ export QUARKUS_HTTP_CORS_ORIGINS='https://push.example.com'
 
 ```text
 GET /q/health
+GET /q/health/ready
 ```
+
+`quarkus-smallrye-health` is already included.
 
 ### Metrics
 
@@ -370,17 +529,12 @@ webpush.responses{status="..."}
 
 ### Tracing
 
-OpenTelemetry is enabled together with JDBC telemetry. Dev/test do not export OTLP unless explicitly configured.
-
-### Logging
-
-Production console logs are structured JSON. Development and tests use human-readable logs.
+OpenTelemetry is enabled together with JDBC telemetry. OTLP export in the external container configuration is opt-in through `OTEL_EXPORT_ENABLED`.
 
 ### OpenAPI
 
 ```text
 GET /q/openapi
-GET /q/swagger-ui    # dev/test
 ```
 
 ## Current delivery semantics
@@ -396,65 +550,31 @@ Operators should know these behaviors:
 
 See [`../docs/operator-guide.md`](../docs/operator-guide.md) for the detailed operational interpretation.
 
-## Source map
-
-```text
-src/main/java/com/quarkus/gatelink/
-├── keymanagement/     # stable VAPID application-server identity
-├── subscriptions/     # REST + PostgreSQL persistence
-├── notifications/     # fan-out + Push Service HTTP
-├── encryption/        # adapter to web-push AES128GCM
-├── signature/         # RFC 8292 VAPID JWT
-├── health/            # MicroProfile Health
-├── bytes/             # key/byte helpers
-└── log/               # logging helpers
-```
-
-HTTP/system tests are inside the same Maven project:
-
-```text
-src/test/java/com/quarkus/gatelink/system/
-```
-
-They use MicroProfile REST Client and raw HTTP where needed against the real Quarkus test endpoint.
-
 ## Build and test
 
-Requirements:
-
-- Java 21
-- Maven 3.9+
-- PostgreSQL on `localhost:5432` for the configured test profile
+Backend tests use PostgreSQL on host port 5432 in the test profile:
 
 ```bash
 docker compose up -d postgres
-cd quarkus-gatelink-server
 mvn clean verify
 ```
 
-## Development mode
+From the repository root, CI additionally validates the Compose model and builds both production application images.
+
+## Local Quarkus development
 
 ```bash
 cd quarkus-gatelink-server
 mvn quarkus:dev
 ```
 
-Default URL:
-
-```text
-http://localhost:8080
-```
-
-## Docker image
-
-```bash
-mvn clean package
-docker build -f src/main/docker/Dockerfile.jvm -t quarkus-gatelink-server:latest .
-```
+Development remains separate from the production Compose runtime and uses the source-tree `src/main/resources/application.properties` profile settings.
 
 ## Related documentation
 
-- [`../docs/operator-guide.md`](../docs/operator-guide.md) — complete operational flow and troubleshooting semantics.
-- [`../docs/integration-examples.md`](../docs/integration-examples.md) — Java and TypeScript client examples.
-- [`../README.md`](../README.md) — repository overview and quick start.
-- [`../quarkus-gatelink-webpush-ui/README.md`](../quarkus-gatelink-webpush-ui/README.md) — browser-side flow.
+- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) — full Docker/Compose deployment and update procedure.
+- [`../docs/operator-guide.md`](../docs/operator-guide.md) — end-to-end runtime and troubleshooting semantics.
+- [`../docs/webpush-java.md`](../docs/webpush-java.md) — selected Java Web Push library.
+- [`../docs/integration-examples.md`](../docs/integration-examples.md) — Java and TypeScript API examples.
+- [`../README.md`](../README.md) — repository overview.
+- [`../quarkus-gatelink-webpush-ui/README.md`](../quarkus-gatelink-webpush-ui/README.md) — Angular/Nginx browser-side flow.
