@@ -24,6 +24,7 @@ on:
       - 'quarkus-gatelink-webpush-ui/docker-entrypoint.sh'
       - 'quarkus-gatelink-webpush-ui/angular.json'
       - 'quarkus-gatelink-webpush-ui/package.json'
+      - 'quarkus-gatelink-webpush-ui/package-lock.json'
 
 permissions:
   contents: write
@@ -103,7 +104,7 @@ jobs:
       - name: Build Angular production application
         working-directory: quarkus-gatelink-webpush-ui
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build
 
       - name: Assemble release directories
