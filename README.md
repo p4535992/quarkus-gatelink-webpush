@@ -26,9 +26,11 @@ The protocol implementation is intentionally **modern-only**:
 .
 ├── compose.yaml
 ├── .env.example
+├── deploy/
+│   └── backend/
+│       └── application.properties
 ├── quarkus-gatelink-server/
 │   ├── Dockerfile
-│   ├── config/application.properties
 │   ├── runtime/logs/
 │   ├── runtime/tmp/
 │   └── src/
@@ -39,6 +41,8 @@ The protocol implementation is intentionally **modern-only**:
     ├── angular.json
     └── src/
 ```
+
+The container runtime configuration intentionally lives outside the Quarkus module. If a file named `config/application.properties` were kept under `quarkus-gatelink-server/`, normal Maven/dev/test executions could load Docker-only settings such as the hostname `postgres`. Compose instead mounts `deploy/backend/application.properties` into the standard runtime path `/opt/app/config/application.properties`.
 
 ## Production-style Docker quick start
 
@@ -119,7 +123,7 @@ The following paths are external to the application binary:
 /opt/app/tmp/                            java.io.tmpdir
 ```
 
-The Dockerfile builds the Quarkus uber-JAR in a Maven build stage and copies it into the JRE runtime image. Java source and Maven are not present in the runtime image.
+The Docker build stage explicitly requests a Quarkus uber-JAR named `app-runner.jar` and copies it to `/opt/app/app.jar`. Normal Maven test/dev packaging is left unchanged. Java source and Maven are not present in the runtime image.
 
 ## Nginx and Angular
 
@@ -335,7 +339,7 @@ Persistent data:
 | browser subscriptions | Docker named volume `postgres_data` |
 | Quarkus file logs | `quarkus-gatelink-server/runtime/logs` |
 | Quarkus temp | `quarkus-gatelink-server/runtime/tmp` |
-| external runtime config | `quarkus-gatelink-server/config/application.properties` |
+| external runtime config | `deploy/backend/application.properties` |
 
 ## Local Java development
 
