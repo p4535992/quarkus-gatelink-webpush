@@ -1,189 +1,197 @@
 # `quarkus-gatelink-server`
 
-This is the **single Java/Quarkus project** in the repository. It contains both the production GateLink backend and all Java tests, including the former external client/system-test logic.
+This is the single Java 21 / Quarkus backend project. It contains production code and all Java tests.
 
-The server is responsible for:
+> For the complete user → browser → GateLink → PostgreSQL → Push Service → Service Worker lifecycle, see [`../docs/operator-guide.md`](../docs/operator-guide.md).
 
-- exposing the REST API used by browser clients;
-- owning the VAPID application-server key pair;
-- persisting browser Push Subscriptions in PostgreSQL;
-- delegating RFC 8291 / RFC 8188 `aes128gcm` payload encryption to `nl.martijndwars:web-push`;
-- authenticating Web Push requests with RFC 8292 VAPID;
-- forwarding notifications to browser Push Service endpoints;
-- exposing health, metrics and OpenAPI endpoints.
+## Server responsibilities
 
-For the complete end-to-end architecture, see the repository [`README.md`](../README.md).
+GateLink server is responsible for:
 
-## Runtime architecture
+- exposing the REST API;
+- owning the application-server VAPID key pair;
+- validating browser PushSubscription input;
+- persisting subscriptions in PostgreSQL;
+- loading subscriptions for notification fan-out;
+- delegating RFC 8291 / RFC 8188 payload encryption to the Java `nl.martijndwars:web-push` library;
+- creating RFC 8292 VAPID authentication;
+- sending RFC 8030 requests to browser Push Service endpoints;
+- enforcing OIDC/RBAC and notification rate limits;
+- exposing health, metrics, OpenAPI, logs and tracing.
 
-```text
-+-------------------------------+
-| Browser / Angular / other UI  |
-+---------------+---------------+
-                |
-                | REST
-                | GET /keys/public
-                | POST /subscriptions
-                v
-+---------------+---------------+
-| quarkus-gatelink-server       |
-|                               |
-| Quarkus REST                  |
-| RFC 8291 aes128gcm            |
-| RFC 8292 VAPID                |
-+-------+---------------+-------+
-        |               |
-        | JDBC/JPA      | RFC 8030 Web Push HTTP
-        v               v
-+-------+------+   +----+------------------+
-| PostgreSQL   |   | Browser Push Service  |
-| subscriptions|   | FCM / Mozilla / etc. |
-+--------------+   +-----------+-----------+
-                               |
-                               | push delivery
-                               v
-                    +----------+-----------+
-                    | Browser Service      |
-                    | Worker               |
-                    +----------------------+
-```
-
-## One project for server and HTTP client tests
-
-The old standalone `quarkus-gatelink-webpush-client` module has been removed. Its useful role is preserved under:
+## Internal runtime path
 
 ```text
-src/test/java/com/quarkus/gatelink/system/
-├── GateLinkApi.java
-├── SystemTestClient.java
-├── HealthResourceSystemTest.java
-├── KeysResourceSystemTest.java
-├── NotificationsResourceSystemTest.java
-└── SubscriptionsResourceSystemTest.java
+HTTP request
+    |
+    v
+Quarkus REST resource
+    |
+    +-- Jakarta Validation
+    +-- OIDC / @RolesAllowed where required
+    +-- rate limit where required
+    |
+    v
+application boundary / control
+    |
+    +----------------------------+
+    |                            |
+    v                            v
+SubscriptionsStore         EncryptionService
+    |                            |
+    | Panache / JPA              | web-push Java library
+    v                            v
+PostgreSQL                  AES128GCM body
+                                 |
+                                 v
+                           VAPID JWT
+                                 |
+                                 v
+                           JDK HttpClient
+                                 |
+                                 v
+                           Browser Push Service
 ```
 
-The tests use **MicroProfile REST Client** against the HTTP server started by `@QuarkusTest`:
+## Startup: what the server does
+
+1. Quarkus creates the PostgreSQL datasource.
+2. Flyway validates and applies pending migrations.
+3. Hibernate validates the Java mappings against the schema.
+4. `InMemoryKeyStore` initializes the VAPID identity.
+5. If both VAPID keys are configured, GateLink loads the stable P-256 pair.
+6. If only one key is configured, startup fails.
+7. If neither key is configured, GateLink generates a temporary pair and logs a warning.
+8. Quarkus initializes OIDC security.
+9. Hibernate Validator becomes active on REST parameters/entities.
+10. Micrometer and OpenTelemetry instrumentation are initialized.
+11. GateLink starts accepting HTTP requests.
+
+A production deployment should always use a stable VAPID pair. PostgreSQL persistence alone is not enough if the application-server identity changes after restart.
+
+## `GET /keys/public`: server-side sequence
+
+1. Browser calls `GET /keys/public`.
+2. `KeysResource` obtains the current `ECKeys` from `InMemoryKeyStore`.
+3. GateLink serializes only the public key.
+4. The public key is returned as unpadded Base64URL text.
+5. The VAPID private key never leaves the server.
+
+## `POST /subscriptions`: server-side sequence
 
 ```text
-mvn clean verify
-      |
-      v
-@QuarkusTest starts GateLink
-      |
-      | @TestHTTPResource
-      v
-real test URI (normally port 8081)
-      |
-      | MicroProfile REST Client
-      v
-GateLink REST resources
-      |
-      +---- PostgreSQL
-```
-
-This means there is no second Maven project, no `st.sh`, and no requirement to manually start GateLink before running its Java system tests.
-
-Official Quarkus testing documentation:
-
-- https://quarkus.io/guides/getting-started-testing
-- https://quarkus.io/guides/rest-client
-
-## REST technology
-
-The production server uses **Quarkus REST**:
-
-```xml
-<artifactId>quarkus-rest</artifactId>
-<artifactId>quarkus-rest-jsonb</artifactId>
-```
-
-Resources use `jakarta.ws.rs.*`. This is not RESTEasy Classic.
-
-The HTTP test contract uses `quarkus-rest-client-jsonb` in **test scope**, so the MicroProfile REST Client implementation is not an extra production service.
-
-## Persistence
-
-Push subscriptions are stored with:
-
-- PostgreSQL 18;
-- Hibernate ORM with Panache;
-- Flyway migrations;
-- Agroal JDBC pooling through Quarkus PostgreSQL JDBC.
-
-```text
-Browser
-   |
-   | POST /subscriptions
-   v
+POST /subscriptions
+       |
+       v
 SubscriptionsResource
-   |
-   v
-SubscriptionsStore
-   |
-   | Hibernate ORM / Panache
-   v
-PostgreSQL
+       |
+       | @Valid
+       v
+PushSubscription validation
+       |
+       +-- endpoint is absolute HTTPS
+       +-- p256dh is canonical Base64URL
+       +-- p256dh decodes to 65-byte uncompressed P-256 key
+       +-- auth is canonical Base64URL
+       `-- auth decodes to exactly 16 bytes
+       |
+       v
+SubscriptionsStore.addSubscription(...)
+       |
+       | native PostgreSQL upsert
+       v
+push_subscriptions
 ```
 
-A Push Subscription is durable application state. Without PostgreSQL, a restart would lose every registered browser.
+Exact sequence:
 
-Official documentation:
-
-- Quarkus datasource: https://quarkus.io/guides/datasource
-- Hibernate ORM with Panache: https://quarkus.io/guides/hibernate-orm-panache
-- Flyway: https://quarkus.io/guides/flyway
-
-## Local PostgreSQL
-
-From the repository root:
-
-```bash
-docker compose up -d postgres
-```
-
-Connection settings:
-
-```text
-host:     localhost
-port:     5432
-database: gatelink
-username: gatelink
-password: gatelink
-```
-
-Open `psql`:
-
-```bash
-docker compose exec postgres psql -U gatelink -d gatelink
-```
-
-Inspect subscriptions:
+1. Quarkus deserializes the JSON body into `PushSubscription`.
+2. Jakarta Validation runs before persistence.
+3. Invalid input is rejected with HTTP `400`.
+4. Valid input reaches `SubscriptionsStore.addSubscription`.
+5. The JPA persistence context is cleared.
+6. GateLink performs:
 
 ```sql
-SELECT endpoint FROM push_subscriptions;
+INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+VALUES (:endpoint, :p256dh, :auth)
+ON CONFLICT (endpoint) DO UPDATE SET
+    p256dh = EXCLUDED.p256dh,
+    auth = EXCLUDED.auth;
 ```
 
-Stop while preserving data:
+7. The endpoint is the primary key, so re-registration refreshes the keys without duplicating the subscription.
+8. The persistence context is cleared again.
+9. The REST call returns HTTP `204`.
 
-```bash
-docker compose down
-```
+## `POST /notifications`: server-side sequence
 
-Delete the local database volume:
-
-```bash
-docker compose down -v
-```
-
-## Database migrations
-
-Flyway owns the schema under:
+This is an administrative endpoint.
 
 ```text
-src/main/resources/db/migration/
+POST /notifications
+       |
+       +-- OIDC Bearer authentication
+       +-- gatelink-admin role
+       +-- 20 requests/minute rate limit
+       +-- non-blank payload
+       +-- max 3993 UTF-8 bytes
+       |
+       v
+NotificationsSender
+       |
+       +--> load VAPID keys
+       +--> PostgreSQL: load subscriptions
+       |
+       `--> for each subscription
+              |
+              +--> EncryptionService
+              |      |
+              |      `--> web-push / Encoding.AES128GCM
+              |
+              +--> create VAPID JWT
+              |
+              +--> JDK HttpClient POST to Push Service
+              |
+              `--> record HTTP status metric
 ```
 
-The initial migration creates:
+Exact sequence:
+
+1. Quarkus authenticates the OIDC Bearer token.
+2. `@RolesAllowed("gatelink-admin")` checks authorization.
+3. SmallRye Fault Tolerance enforces 20 calls/minute.
+4. Jakarta Validation rejects blank messages.
+5. GateLink verifies the UTF-8 payload is at most 3993 octets.
+6. `webpush.messages.forwarded` is incremented.
+7. `NotificationsSender` obtains the GateLink VAPID key pair.
+8. `SubscriptionsStore.all()` clears the persistence context and reads a fresh list from PostgreSQL.
+9. GateLink creates one `Notification` per stored subscription.
+10. `EncryptionService` validates the subscription auth material again.
+11. GateLink creates the library `nl.martijndwars.webpush.Notification`.
+12. `AbstractPushService.encrypt(...)` is called with `Encoding.AES128GCM` explicitly.
+13. The library returns the RFC 8291 / RFC 8188 encrypted body.
+14. GateLink extracts the origin of the subscription endpoint for the VAPID audience.
+15. GateLink creates an ES256 VAPID JWT using the stable private key.
+16. `webpush.push.attempts{push_service="..."}` is incremented.
+17. `PushServiceClient` sends the JDK HTTP request to the subscription endpoint.
+18. The request contains only the modern delivery shape:
+
+```text
+TTL: 2419200
+Content-Encoding: aes128gcm
+Authorization: vapid t=<JWT>, k=<public-key>
+Content-Type: application/octet-stream
+```
+
+19. The Push Service response status is recorded as `webpush.responses{status="..."}`.
+20. `2xx` is considered successful by the internal client.
+21. Non-`2xx` statuses are currently recorded but not returned as a per-subscription delivery report.
+22. If all sends complete without an exception, the REST endpoint returns HTTP `204`.
+
+## PostgreSQL persistence
+
+GateLink stores browser subscriptions in PostgreSQL 18 using Hibernate ORM with Panache and Flyway.
 
 ```text
 push_subscriptions
@@ -194,82 +202,221 @@ push_subscriptions
 +----------+------+
 ```
 
-Do not edit an already-applied migration in a deployed environment; add a new versioned migration.
+The VAPID private key is not stored in this table.
 
-## API endpoints
+### Local PostgreSQL
 
-| Method | Path | Purpose |
+From repository root:
+
+```bash
+docker compose up -d postgres
+```
+
+Connection:
+
+```text
+host:     localhost
+port:     5432
+database: gatelink
+username: gatelink
+password: gatelink
+```
+
+Inspect subscriptions:
+
+```bash
+docker compose exec postgres psql -U gatelink -d gatelink
+```
+
+```sql
+SELECT endpoint, p256dh, auth FROM push_subscriptions;
+```
+
+Flyway owns schema changes under:
+
+```text
+src/main/resources/db/migration/
+```
+
+Never rewrite a migration already applied in a deployed environment; add a new versioned migration.
+
+## API access model
+
+| Method | Path | Access |
 | --- | --- | --- |
-| `GET` | `/keys/public` | public VAPID application-server key |
-| `POST` | `/subscriptions` | creates or updates a browser Push Subscription |
-| `GET` | `/subscriptions` | **admin**: lists known subscription endpoints |
-| `DELETE` | `/subscriptions/{endpoint}` | removes one Base64URL-encoded endpoint |
-| `DELETE` | `/subscriptions` | **admin**: removes all subscriptions |
-| `POST` | `/notifications` | **admin**: sends notification; limited to 20 requests/minute |
-| `GET` | `/q/health` | MicroProfile Health |
-| `GET` | `/q/metrics` | Prometheus/Micrometer metrics |
-| `GET` | `/q/openapi` | OpenAPI document |
-| `GET` | `/q/swagger-ui` | Swagger UI in dev/test |
+| `GET` | `/keys/public` | public |
+| `POST` | `/subscriptions` | public + strict validation |
+| `DELETE` | `/subscriptions/{endpoint}` | public + path validation |
+| `GET` | `/subscriptions` | `gatelink-admin` |
+| `DELETE` | `/subscriptions` | `gatelink-admin` |
+| `POST` | `/notifications` | `gatelink-admin` + 20/minute rate limit |
 
-## Web Push protocol
+The browser-facing endpoints remain public because they are part of subscription lifecycle management. Administrative inventory and fan-out operations require OIDC.
 
-GateLink implements only the current protocol; there is no obsolete `aesgcm` fallback. Payload encryption is delegated to `nl.martijndwars:web-push` 5.1.2 with `Encoding.AES128GCM` selected explicitly. GateLink deliberately does not use the library's legacy HTTP sender paths.
+## Unsubscribe handling
+
+`DELETE /subscriptions/{endpoint}` receives a Base64URL-encoded subscription endpoint.
+
+1. GateLink validates that the path value is non-blank, bounded and Base64URL-shaped.
+2. GateLink decodes it to the original endpoint string.
+3. `SubscriptionsStore.remove(endpoint)` deletes that primary-key row.
+4. This removes GateLink's server-side record; frontend code is separately responsible for the browser Push API subscription lifecycle.
+
+`DELETE /subscriptions` is a distinct admin-only operation that deletes every database row.
+
+## Web Push implementation
+
+GateLink uses:
+
+```xml
+<groupId>nl.martijndwars</groupId>
+<artifactId>web-push</artifactId>
+<version>5.1.2</version>
+```
+
+The library is used for payload cryptography only. GateLink retains outbound HTTP construction so the modern wire format is explicit and testable.
 
 ```text
 PushSubscription
-(endpoint, p256dh, auth)
+(endpoint + p256dh + auth)
         |
-        | P-256 ECDH
         v
-shared secret
+EncryptionService
         |
-        | HKDF-SHA256 + auth secret
+        | nl.martijndwars:web-push
+        | Encoding.AES128GCM
         v
-RFC 8291 IKM
+RFC 8291 / RFC 8188 body
         |
-        | random 16-byte salt
-        | RFC 8188 CEK + nonce derivation
-        v
-AES-128-GCM
+        +-- VAPID JWT generated by GateLink
         |
-        | salt + rs + ephemeral key in body
         v
-Content-Encoding: aes128gcm
+PushServiceClient
         |
-        | Authorization: vapid t=<JWT>, k=<VAPID public key>
         v
-Push Service
+Browser Push Service
 ```
 
-Implementation constraints include a 4096-octet record size, 65-octet uncompressed P-256 keys, a 16-octet subscription auth secret, a fresh ephemeral ECDH key per notification and a maximum plaintext size chosen so the complete encrypted body fits within 4096 octets.
+There is no GateLink path using `Encoding.AESGCM`, and GateLink does not emit legacy `Encryption` / `Crypto-Key` delivery headers.
 
-The library encryption path is checked against the RFC 8188 `aes128gcm` interoperability vector. GateLink separately tests the HTTP request shape and guarantees that obsolete `Encryption` and `Crypto-Key` delivery headers are absent.
+## VAPID configuration
 
-Standards:
+Production:
 
-- RFC 8030: https://www.rfc-editor.org/rfc/rfc8030.html
-- RFC 8188: https://www.rfc-editor.org/rfc/rfc8188.html
-- RFC 8291: https://www.rfc-editor.org/rfc/rfc8291.html
-- RFC 8292: https://www.rfc-editor.org/rfc/rfc8292.html
-- W3C Push API: https://www.w3.org/TR/push-api/
+```bash
+export WEBPUSH_VAPID_PUBLIC_KEY='...'
+export WEBPUSH_VAPID_PRIVATE_KEY='...'
+export WEBPUSH_VAPID_SUBJECT='mailto:admin@example.com'
+```
+
+Both public and private key must be provided together.
+
+The VAPID pair identifies the application server and signs RFC 8292 authentication. Payload encryption uses separate ephemeral key agreement inside the Web Push encryption implementation.
+
+## OIDC configuration
+
+Production:
+
+```bash
+export GATELINK_OIDC_AUTH_SERVER_URL='https://id.example.com/realms/gatelink'
+export GATELINK_OIDC_CLIENT_ID='gatelink-server'
+```
+
+Development uses Quarkus OIDC Dev Services when Docker is available. `alice` is assigned `gatelink-admin`.
+
+Tests disable the external OIDC provider and use `quarkus-test-security` identities.
+
+## Datasource configuration
+
+Production:
+
+```bash
+export GATELINK_DB_URL='jdbc:postgresql://postgres.example.internal:5432/gatelink'
+export GATELINK_DB_USER='gatelink'
+export GATELINK_DB_PASSWORD='replace-me'
+```
+
+Do not reuse development credentials in production.
+
+## CORS
+
+Production origins must be explicit:
+
+```bash
+export QUARKUS_HTTP_CORS_ORIGINS='https://push.example.com'
+```
+
+## Observability
+
+### Health
+
+```text
+GET /q/health
+```
+
+### Metrics
+
+```text
+GET /q/metrics
+```
+
+GateLink-specific counters:
+
+```text
+webpush.messages.forwarded
+webpush.push.attempts{push_service="..."}
+webpush.responses{status="..."}
+```
+
+### Tracing
+
+OpenTelemetry is enabled together with JDBC telemetry. Dev/test do not export OTLP unless explicitly configured.
+
+### Logging
+
+Production console logs are structured JSON. Development and tests use human-readable logs.
+
+### OpenAPI
+
+```text
+GET /q/openapi
+GET /q/swagger-ui    # dev/test
+```
+
+## Current delivery semantics
+
+Operators should know these behaviors:
+
+- no automatic retry of Push Service requests;
+- no automatic deletion of stored subscriptions after Push Service `404` / `410`;
+- no per-browser delivery report in the admin REST response;
+- a Push Service non-`2xx` is recorded in metrics but does not by itself fail the fan-out REST response;
+- a network I/O exception can terminate the current synchronous fan-out;
+- Push Service acceptance is not a user acknowledgement.
+
+See [`../docs/operator-guide.md`](../docs/operator-guide.md) for the detailed operational interpretation.
 
 ## Source map
 
 ```text
 src/main/java/com/quarkus/gatelink/
-├── keymanagement/     # VAPID keys
+├── keymanagement/     # stable VAPID application-server identity
 ├── subscriptions/     # REST + PostgreSQL persistence
 ├── notifications/     # fan-out + Push Service HTTP
 ├── encryption/        # adapter to web-push AES128GCM
-├── signature/         # RFC 8292 VAPID
+├── signature/         # RFC 8292 VAPID JWT
 ├── health/            # MicroProfile Health
-├── bytes/             # byte helpers
-└── log/               # logging
-
-src/test/java/com/quarkus/gatelink/
-├── system/            # HTTP/system tests via MicroProfile REST Client
-└── ...                # unit/component/persistence tests
+├── bytes/             # key/byte helpers
+└── log/               # logging helpers
 ```
+
+HTTP/system tests are inside the same Maven project:
+
+```text
+src/test/java/com/quarkus/gatelink/system/
+```
+
+They use MicroProfile REST Client and raw HTTP where needed against the real Quarkus test endpoint.
 
 ## Build and test
 
@@ -285,8 +432,6 @@ cd quarkus-gatelink-server
 mvn clean verify
 ```
 
-A single Maven build now runs the complete Java test suite.
-
 ## Development mode
 
 ```bash
@@ -300,42 +445,6 @@ Default URL:
 http://localhost:8080
 ```
 
-In dev mode Quarkus starts Keycloak Dev Services automatically when Docker is available. Use `/q/dev-ui` and the built-in `alice` identity, configured with role `gatelink-admin`, to exercise secured administration endpoints.
-
-## Production database configuration
-
-```bash
-export GATELINK_DB_URL='jdbc:postgresql://postgres.example.internal:5432/gatelink'
-export GATELINK_DB_USER='gatelink'
-export GATELINK_DB_PASSWORD='replace-me'
-export GATELINK_OIDC_AUTH_SERVER_URL='https://id.example.com/realms/gatelink'
-export GATELINK_OIDC_CLIENT_ID='gatelink-server'
-```
-
-Do not reuse local development credentials in production.
-
-## VAPID keys
-
-Configure a stable P-256 VAPID pair in production:
-
-```bash
-export WEBPUSH_VAPID_PUBLIC_KEY='...'
-export WEBPUSH_VAPID_PRIVATE_KEY='...'
-export WEBPUSH_VAPID_SUBJECT='mailto:admin@example.com'
-```
-
-The VAPID key pair signs RFC 8292 authentication. A separate ephemeral P-256 key pair is generated per notification for RFC 8291 key agreement. The private VAPID key must never be returned by the API or logged.
-
-## CORS
-
-Production origins must be explicit:
-
-```bash
-export QUARKUS_HTTP_CORS_ORIGINS='https://push.example.com'
-```
-
-Documentation: https://quarkus.io/guides/security-cors
-
 ## Docker image
 
 ```bash
@@ -343,24 +452,9 @@ mvn clean package
 docker build -f src/main/docker/Dockerfile.jvm -t quarkus-gatelink-server:latest .
 ```
 
-## Security and observability
+## Related documentation
 
-- `quarkus-hibernate-validator` rejects malformed subscriptions before persistence/crypto.
-- `quarkus-oidc` + `@RolesAllowed("gatelink-admin")` protect notification fan-out and subscription inventory/destructive administration.
-- SmallRye Fault Tolerance limits `POST /notifications` to 20 calls/minute and returns HTTP 429 when exceeded.
-- `quarkus-opentelemetry` is enabled together with JDBC telemetry.
-- `quarkus-logging-json` provides structured production logs; dev/test stay human-readable.
-- Browser subscription registration and individual unsubscribe remain public because they are browser-facing flows, but their inputs are strictly validated.
-
-## Remaining production hardening
-
-Before public Internet exposure, add:
-
-- stronger SSRF/network-policy protection for Push Service endpoints;
-- production secret management for database/VAPID credentials and stored subscription secrets;
-- database backup/restore policy;
-- end-to-end tests against the real Push Services of supported browsers.
-
-## Java and TypeScript integration examples
-
-External applications should integrate through the GateLink HTTP API rather than importing server implementation classes. See [`../docs/integration-examples.md`](../docs/integration-examples.md) for Java 21, MicroProfile REST Client, TypeScript, and Angular examples.
+- [`../docs/operator-guide.md`](../docs/operator-guide.md) — complete operational flow and troubleshooting semantics.
+- [`../docs/integration-examples.md`](../docs/integration-examples.md) — Java and TypeScript client examples.
+- [`../README.md`](../README.md) — repository overview and quick start.
+- [`../quarkus-gatelink-webpush-ui/README.md`](../quarkus-gatelink-webpush-ui/README.md) — browser-side flow.
