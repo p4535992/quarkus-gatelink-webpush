@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:18.4-alpine3.24
         env:
           POSTGRES_DB: gatelink
           POSTGRES_USER: gatelink
@@ -37,3 +37,7 @@ jobs:
           cache: maven
       - name: Build and test GateLink server
         run: mvn -B -f quarkus-gatelink-server/pom.xml clean verify
+      - name: Validate Docker Compose configuration
+        run: docker compose --env-file .env.example config --quiet
+      - name: Build production container images
+        run: docker compose --env-file .env.example build backend frontend
