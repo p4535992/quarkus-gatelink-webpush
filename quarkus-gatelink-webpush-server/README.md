@@ -1,28 +1,70 @@
 # `quarkus-gatelink-webpush-server`
 
-This is the Java 21 / Quarkus backend. It contains production code and all Java tests.
+This module is the Java 21 / Quarkus Web Push server. It contains the production Java code and all Java tests.
 
-Read these documents first:
+Maven coordinates:
+
+```xml
+<groupId>com.quarkus</groupId>
+<artifactId>quarkus-gatelink-webpush-server</artifactId>
+```
+
+Read also:
 
 - [`../docs/operator-guide.md`](../docs/operator-guide.md) — complete runtime lifecycle;
-- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) — Docker/Compose deployment;
+- [`../docs/docker-deployment.md`](../docs/docker-deployment.md) — Docker/HTTPS deployment;
 - [`../docs/webpush-java.md`](../docs/webpush-java.md) — Java Web Push library boundary.
 
-## What the server does
+## Runtime identity and ports
+
+Inside Docker, all three identifiers are deliberately identical:
+
+```text
+Compose service:  quarkus-gatelink-webpush-server
+container_name:   quarkus-gatelink-webpush-server
+Docker hostname:  quarkus-gatelink-webpush-server
+```
+
+The server listens simultaneously on:
+
+```text
+HTTP  :8080
+HTTPS :8443
+```
+
+The normal browser path does **not** call those ports directly. Nginx in `quarkus-gatelink-webpush-ui` receives browser traffic on HTTPS 443 and proxies `/api/...` to:
+
+```text
+https://quarkus-gatelink-webpush-server:8443/
+```
+
+Direct operator/API calls remain possible when required:
+
+```bash
+curl http://localhost:8080/q/health/ready
+curl -k https://localhost:8443/q/health/ready
+```
+
+## What the server owns
 
 GateLink owns:
 
 - Quarkus REST endpoints;
-- strict PushSubscription validation;
+- PushSubscription validation;
 - PostgreSQL subscription persistence;
-- OIDC/RBAC for administrative calls;
+- OIDC/RBAC for administrative operations;
 - notification rate limiting;
-- stable VAPID application-server identity;
-- RFC 8292 VAPID JWT creation;
-- Web Push fan-out and Push Service HTTP calls;
+- VAPID application-server identity and JWT creation;
+- Web Push fan-out and outbound HTTP;
 - health, metrics, tracing and logs.
 
-Payload cryptography is delegated to `nl.martijndwars:web-push:5.1.2` with `Encoding.AES128GCM` selected explicitly.
+Payload encryption is delegated to:
+
+```text
+nl.martijndwars:web-push:5.1.2
+```
+
+with `Encoding.AES128GCM` selected explicitly.
 
 ```text
 REST request
@@ -32,97 +74,110 @@ REST request
     v
 GateLink
     |
-    +--> PostgreSQL: subscription state
+    +--> PostgreSQL: endpoint + p256dh + auth
     |
     +--> web-push Java: RFC 8291 / RFC 8188 encryption
     |
-    +--> GateLink: VAPID JWT
+    +--> GateLink: RFC 8292 VAPID JWT
     |
-    `--> JDK HttpClient: Push Service
+    `--> JDK HttpClient: browser Push Service
 ```
 
-## Docker runtime
+There is no GateLink legacy path for obsolete `aesgcm`, `Encryption` or `Crypto-Key` delivery formats.
 
-The production runtime image is:
+## Docker image
+
+Build stage:
+
+```text
+maven:3.9.13-eclipse-temurin-21-noble
+```
+
+Runtime image:
 
 ```text
 eclipse-temurin:21-jre-noble
 ```
 
-No Red Hat UBI and no Podman-specific image is used.
-
-The Docker build stage requests an uber-JAR only for the image build:
+The Docker build creates a Quarkus uber-JAR and installs it as:
 
 ```text
--Dquarkus.package.jar.type=uber-jar
--Dquarkus.package.output-name=app
+/opt/app/app.jar
 ```
 
-Normal Maven test/dev packaging remains unchanged.
-
-Inside the runtime image:
-
-```text
-/opt/app/app.jar                         application binary
-/opt/app/config/application.properties  external config, read-only
-/opt/app/logs/                           writable persistent logs
-/opt/app/tmp/                            writable java.io.tmpdir
-```
-
-The process runs as:
+Runtime identity:
 
 ```text
 UID:GID = 10001:10001
 ```
 
-and starts with:
+Important runtime paths:
 
 ```text
-java -jar /opt/app/app.jar
+/opt/app/app.jar                         application binary
+/opt/app/config/application.properties  external Docker config, read-only
+/opt/app/logs/                           persistent logs
+/opt/app/tmp/                            java.io.tmpdir
+/opt/app/tls/tls.crt                    generated server certificate
+/opt/app/tls/tls.key                    generated server private key
 ```
 
-`JAVA_TOOL_OPTIONS` includes:
+The image installs OpenSSL for first-start certificate creation and `curl` for the HTTPS healthcheck.
+
+## Self-signed HTTPS
+
+`docker-entrypoint.sh` checks the `server_tls` volume before starting Java.
+
+If TLS material is missing it creates:
 
 ```text
--Djava.io.tmpdir=/opt/app/tmp
--Djava.util.logging.manager=org.jboss.logmanager.LogManager
+/opt/app/tls/tls.crt
+/opt/app/tls/tls.key
 ```
 
-## External production configuration
+using RSA-3072 / SHA-256. Defaults are controlled by:
 
-The source file is intentionally outside this Maven module:
+```text
+SERVER_TLS_COMMON_NAME=quarkus-gatelink-webpush-server
+SERVER_TLS_SAN=DNS:quarkus-gatelink-webpush-server,DNS:localhost,IP:127.0.0.1
+TLS_DAYS=825
+```
+
+The private key is generated at runtime and is never stored in Git.
+
+The external Docker Quarkus configuration uses the PEM files and keeps HTTP enabled:
+
+```properties
+quarkus.http.port=8080
+quarkus.http.ssl-port=8443
+quarkus.http.insecure-requests=enabled
+quarkus.tls.key-store.pem.0.cert=/opt/app/tls/tls.crt
+quarkus.tls.key-store.pem.0.key=/opt/app/tls/tls.key
+```
+
+## External Docker configuration
+
+The source file is intentionally outside the Maven module:
 
 ```text
 ../deploy/server/application.properties
 ```
 
-Compose mounts it as:
+Compose mounts it read-only as:
 
 ```text
 /opt/app/config/application.properties
 ```
 
-Because the container uses `WORKDIR /opt/app`, Quarkus loads it from the standard external location:
+This separation is intentional: normal `mvn test` and `mvn quarkus:dev` executions must not accidentally load Docker-only hostnames such as `postgres` or Docker TLS paths.
 
-```text
-$PWD/config/application.properties
-```
-
-Keeping the source copy outside `quarkus-gatelink-webpush-server/config/` is deliberate. A module-local `config/application.properties` would also be visible to ordinary Maven/dev/test executions and could leak Docker-only settings such as hostname `postgres` into tests.
-
-The file is mounted read-only. Secrets remain environment variables.
-
-## PostgreSQL in Docker
-
-The backend reaches the database as:
+Inside Compose, the server reaches PostgreSQL as:
 
 ```text
 jdbc:postgresql://postgres:5432/${DB_NAME}
 ```
 
-Never use `localhost` for backend → PostgreSQL communication inside Compose.
-
-Compose injects:
+Compose supplies:
 
 ```text
 DB_NAME
@@ -130,9 +185,23 @@ DB_USER
 DB_PASSWORD
 ```
 
-from the PostgreSQL values in `.env`.
+## Standalone JAR configuration
 
-PostgreSQL stores only the durable PushSubscription registry:
+The packaged application also retains its non-Compose production profile. When the released JAR is run directly **without** `deploy/server/application.properties`, its packaged `%prod` configuration expects:
+
+```text
+GATELINK_DB_URL
+GATELINK_DB_USER
+GATELINK_DB_PASSWORD
+GATELINK_OIDC_AUTH_SERVER_URL
+GATELINK_OIDC_CLIENT_ID
+```
+
+The Docker/Compose deployment instead uses the external config described above.
+
+## PostgreSQL role
+
+PostgreSQL stores the durable browser subscription registry:
 
 ```text
 push_subscriptions
@@ -143,39 +212,44 @@ push_subscriptions
 +----------+------+
 ```
 
-It is not a notification queue, notification history, delivery-acknowledgement store, or VAPID private-key store.
+It does not store notification history, delivery acknowledgements or the VAPID private key and is not used as a message queue.
 
 ## Startup sequence
 
 ```text
-PostgreSQL healthy
-       |
-       v
-backend starts
-       |
-       +-- datasource -> postgres:5432
-       +-- Flyway migration
-       +-- Hibernate mapping validation
-       +-- VAPID key loading
-       +-- OIDC/security initialization
-       +-- metrics/tracing initialization
-       |
-       v
-/q/health/ready = UP
-       |
-       v
-frontend may start
+postgres healthy
+      |
+      v
+quarkus-gatelink-webpush-server starts
+      |
+      +-- TLS certificate already present/generated by entrypoint
+      +-- datasource -> postgres:5432
+      +-- Flyway migrations
+      +-- Hibernate mapping validation
+      +-- VAPID key loading
+      +-- OIDC/security initialization
+      +-- metrics/tracing initialization
+      |
+      v
+HTTPS /q/health/ready = UP on :8443
+      |
+      v
+quarkus-gatelink-webpush-ui may start
 ```
 
-Production must use a stable VAPID pair. If both VAPID keys are absent, GateLink creates a temporary development pair; if only one is supplied, startup fails.
+Production must use a stable VAPID pair. If both VAPID keys are absent GateLink generates a temporary development pair; if only one is supplied startup fails.
 
 ## `GET /keys/public`
 
-1. Nginx receives `/api/keys/public`.
-2. It proxies to GateLink as `/keys/public`.
-3. `KeysResource` gets the active VAPID key pair.
-4. GateLink returns only the public key in unpadded Base64URL form.
-5. The private VAPID key never leaves the backend.
+Normal UI flow:
+
+1. Browser requests `GET https://<ui-host>/api/keys/public`.
+2. Nginx removes `/api/` and calls `https://quarkus-gatelink-webpush-server:8443/keys/public`.
+3. `KeysResource` obtains the active VAPID identity.
+4. GateLink returns only the public VAPID key in unpadded Base64URL form.
+5. The VAPID private key never leaves the server.
+
+Direct server paths are still `/keys/public` on ports 8080/8443.
 
 ## `POST /subscriptions`
 
@@ -198,13 +272,13 @@ SubscriptionsStore
 PostgreSQL
 ```
 
-The endpoint is the primary key, so re-registering the same browser refreshes `p256dh`/`auth` rather than creating a duplicate.
+The endpoint is the primary key. Re-registering the same endpoint refreshes `p256dh` and `auth` instead of creating a duplicate.
 
-Invalid subscriptions are rejected before persistence.
+From the normal UI origin this endpoint is `/api/subscriptions`.
 
 ## `POST /notifications`
 
-This is an administrative endpoint.
+This is an administrative operation:
 
 ```text
 POST /notifications
@@ -228,7 +302,7 @@ NotificationsSender
               `--> record response status metric
 ```
 
-The outbound modern-only request is:
+Outbound modern Web Push request shape:
 
 ```text
 TTL: 2419200
@@ -237,40 +311,39 @@ Authorization: vapid t=<JWT>, k=<public-key>
 Content-Type: application/octet-stream
 ```
 
-GateLink does not emit obsolete `Encryption` or `Crypto-Key` delivery headers and has no application path using `Encoding.AESGCM`.
+From the normal UI/reverse-proxy origin the REST path is `/api/notifications`.
 
-## API access model
+## REST access model
 
-| Method | Path | Access |
-| --- | --- | --- |
-| `GET` | `/keys/public` | public |
-| `POST` | `/subscriptions` | public + strict validation |
-| `DELETE` | `/subscriptions/{endpoint}` | public + path validation |
-| `GET` | `/subscriptions` | `gatelink-admin` |
-| `DELETE` | `/subscriptions` | `gatelink-admin` |
-| `POST` | `/notifications` | `gatelink-admin` + 20/min rate limit |
+| Method | Quarkus path | UI path | Access |
+| --- | --- | --- | --- |
+| `GET` | `/keys/public` | `/api/keys/public` | public |
+| `POST` | `/subscriptions` | `/api/subscriptions` | public + validation |
+| `DELETE` | `/subscriptions/{endpoint}` | `/api/subscriptions/{endpoint}` | public + validation |
+| `GET` | `/subscriptions` | `/api/subscriptions` | `gatelink-admin` |
+| `DELETE` | `/subscriptions` | `/api/subscriptions` | `gatelink-admin` |
+| `POST` | `/notifications` | `/api/notifications` | `gatelink-admin` + rate limit |
 
-Nginx exposes the same endpoints to the browser under `/api/...`.
+Management endpoints are also reachable through `/api/q/...` from Nginx and directly as `/q/...` on 8080/8443.
 
 ## OIDC
 
-The three-container Compose stack intentionally contains only:
+The three-container Compose stack contains:
 
 ```text
-frontend + backend + postgres
+quarkus-gatelink-webpush-ui
+quarkus-gatelink-webpush-server
+postgres
 ```
 
-so no identity provider container is added. `.env.example` leaves OIDC disabled for a self-contained local startup.
-
-For production administrative operations configure an external OIDC provider:
+It does not contain an identity provider. `.env.example` therefore defaults to:
 
 ```text
-OIDC_ENABLED=true
-OIDC_AUTH_SERVER_URL=https://id.example.com/realms/gatelink
-OIDC_CLIENT_ID=gatelink-server
+OIDC_ENABLED=false
+OIDC_CLIENT_ID=quarkus-gatelink-webpush-server
 ```
 
-Administrative tokens need role:
+Production administrative operations should use a real external issuer and tokens carrying:
 
 ```text
 gatelink-admin
@@ -286,51 +359,31 @@ WEBPUSH_VAPID_PRIVATE_KEY=...
 WEBPUSH_VAPID_SUBJECT=mailto:admin@example.com
 ```
 
-The VAPID key pair identifies the application server. It is separate from the ephemeral encryption key material produced for individual Web Push messages by the encryption implementation.
+VAPID identity is separate from the ephemeral ECDH encryption material generated for individual Web Push messages.
 
-## Logging
+## Logging and temporary files
 
-Console output remains enabled for:
+Follow container logs:
 
 ```bash
-docker compose logs -f backend
+docker compose logs -f quarkus-gatelink-webpush-server
 ```
 
-GateLink additionally writes:
+Persistent source-Compose log file:
 
 ```text
-/opt/app/logs/application.log
+quarkus-gatelink-webpush-server/runtime/logs/application.log
 ```
 
-through the host bind mount:
-
-```text
-quarkus-gatelink-webpush-server/runtime/logs/
-```
-
-File rotation is configured for:
-
-```text
-max file size: 50 MB
-max backups:   10
-rotation:      date-suffixed, compressed .gz
-```
-
-## Temporary files
-
-`java.io.tmpdir` is:
+The server also uses:
 
 ```text
 /opt/app/tmp
 ```
 
-bound to:
+as `java.io.tmpdir`.
 
-```text
-quarkus-gatelink-webpush-server/runtime/tmp/
-```
-
-Both runtime directories must be writable on the host by `10001:10001`.
+File logging rotates at 50 MB with 10 compressed backups.
 
 ## Observability
 
@@ -347,7 +400,7 @@ Metrics:
 GET /q/metrics
 ```
 
-GateLink-specific counters include:
+GateLink counters include:
 
 ```text
 webpush.messages.forwarded
@@ -355,48 +408,50 @@ webpush.push.attempts{push_service="..."}
 webpush.responses{status="..."}
 ```
 
-OpenTelemetry is enabled with JDBC telemetry. OTLP export is opt-in in the container configuration.
-
 OpenAPI:
 
 ```text
 GET /q/openapi
 ```
 
+OpenTelemetry includes JDBC telemetry; OTLP export is opt-in in the Docker config.
+
 ## Current delivery semantics
 
-Operators should not infer behavior that is not implemented:
+Operators should not infer behavior that does not exist:
 
 - no automatic Push Service retry;
-- no automatic database cleanup on Push Service `404`/`410`;
+- no automatic PostgreSQL cleanup on Push Service `404` / `410`;
 - no per-browser delivery report in the admin REST response;
 - a network I/O exception can stop the remaining synchronous fan-out;
-- Push Service `2xx` means request accepted by that Push Service, not user acknowledgement.
-
-See [`../docs/operator-guide.md`](../docs/operator-guide.md).
+- Push Service `2xx` means accepted by that Push Service, not user acknowledgement.
 
 ## Build and test
 
-Start PostgreSQL for the normal local test profile:
+Start PostgreSQL:
 
 ```bash
 docker compose up -d postgres
 ```
 
-Then:
+Run the Java suite:
 
 ```bash
 cd quarkus-gatelink-webpush-server
 mvn clean verify
 ```
 
-The production container image is built from the repository root:
+Build only the server image:
 
 ```bash
-docker compose build backend
+docker compose build quarkus-gatelink-webpush-server
 ```
 
-CI runs the Java test suite, validates the resolved Compose model and builds both production application images.
+Run/update only the server container:
+
+```bash
+docker compose up -d --no-deps quarkus-gatelink-webpush-server
+```
 
 ## Local development
 
@@ -405,10 +460,4 @@ cd quarkus-gatelink-webpush-server
 mvn quarkus:dev
 ```
 
-Local Maven/dev/test uses `src/main/resources/application.properties`; it does not load the Docker runtime file from `deploy/server/`.
-
-## Container HTTP/HTTPS contract
-
-The server service/container/hostname is `quarkus-gatelink-webpush-server`. It listens on HTTP `8080` and HTTPS `8443` simultaneously. The container entrypoint creates `/opt/app/tls/tls.crt` and `/opt/app/tls/tls.key` on first start when they are absent.
-
-UI traffic arrives through Nginx over `https://quarkus-gatelink-webpush-server:8443/`. Direct operator calls may use `http://localhost:8080` or `https://localhost:8443`.
+Normal Maven/dev/test runs use the packaged application configuration and do not load `deploy/server/application.properties`.
