@@ -404,18 +404,18 @@ For protected administrative endpoints in production configure a real issuer and
 
 ## Release artifacts
 
-Publishing a GitHub Release builds and validates:
+Publishing a GitHub Release builds and validates artifacts using the repository/project prefix `quarkus-gatelink-webpush`:
 
 ```text
 quarkus-gatelink-webpush-server-<version>.jar
-gatelink-webpush-ui-<version>.zip
-gatelink-webpush-ui-<version>.tar.gz
-gatelink-compose-<version>.zip
-gatelink-compose-<version>.tar.gz
+quarkus-gatelink-webpush-ui-<version>.zip
+quarkus-gatelink-webpush-ui-<version>.tar.gz
+quarkus-gatelink-webpush-compose-<version>.zip
+quarkus-gatelink-webpush-compose-<version>.tar.gz
 SHA256SUMS
 ```
 
-The Compose archive already contains the Quarkus JAR, Angular production files, TLS entrypoints, Nginx configuration and runtime Dockerfiles. The target host needs Docker/Compose, not Maven or Node.js.
+The UI and Compose archive root directories use the same names as their archive filenames without the `.zip` / `.tar.gz` suffix. The Compose archive already contains the Quarkus JAR, Angular production files, TLS entrypoints, Nginx configuration and runtime Dockerfiles. The target host needs Docker/Compose, not Maven or Node.js.
 
 ## Local Java development
 
