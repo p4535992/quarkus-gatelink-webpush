@@ -15,10 +15,10 @@ nb-configuration.xml
 
 # Local Docker Compose environment and runtime state
 .env
-quarkus-gatelink-webpush-server/runtime/logs/*
-!quarkus-gatelink-webpush-server/runtime/logs/.gitkeep
-quarkus-gatelink-webpush-server/runtime/tmp/*
-!quarkus-gatelink-webpush-server/runtime/tmp/.gitkeep
+data/quarkus-gatelink-webpush-server/logs/*
+!data/quarkus-gatelink-webpush-server/logs/.gitkeep
+data/quarkus-gatelink-webpush-server/tmp/*
+!data/quarkus-gatelink-webpush-server/tmp/.gitkeep
 
 # Angular / Node build state
 quarkus-gatelink-webpush-ui/node_modules/
