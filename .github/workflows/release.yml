@@ -1,0 +1,243 @@
+name: Release artifacts
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: Optional version label for a manual packaging test (for example 1.0.0-test)
+        required: false
+        type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'deploy/release/**'
+      - 'deploy/backend/application.properties'
+      - '.env.example'
+      - 'quarkus-gatelink-server/Dockerfile'
+      - 'quarkus-gatelink-webpush-ui/Dockerfile'
+      - 'quarkus-gatelink-webpush-ui/nginx.conf'
+      - 'quarkus-gatelink-webpush-ui/angular.json'
+      - 'quarkus-gatelink-webpush-ui/package.json'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-artifacts-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4-alpine3.24
+        env:
+          POSTGRES_DB: gatelink
+          POSTGRES_USER: gatelink
+          POSTGRES_PASSWORD: gatelink
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gatelink -d gatelink"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+
+      - name: Resolve release version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            tag='${{ github.event.release.tag_name }}'
+          else
+            tag='${{ inputs.version_label }}'
+            if [[ -z "${tag}" ]]; then
+              tag="manual-${GITHUB_SHA::7}"
+            fi
+          fi
+
+          version="${tag#v}"
+          version="${version//\//-}"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+
+      - name: Verify Quarkus project
+        run: mvn -B -f quarkus-gatelink-server/pom.xml clean verify
+
+      - name: Build Quarkus uber-JAR
+        run: >-
+          mvn -B -f quarkus-gatelink-server/pom.xml
+          -DskipTests
+          -Dquarkus.package.jar.type=uber-jar
+          -Dquarkus.package.output-name=gatelink-server
+          package
+
+      - name: Build Angular production application
+        working-directory: quarkus-gatelink-webpush-ui
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Assemble release directories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION='${{ steps.meta.outputs.version }}'
+          OUT="${GITHUB_WORKSPACE}/release-out"
+          STAGE="${GITHUB_WORKSPACE}/release-stage"
+          UI_NAME="gatelink-webpush-ui-${VERSION}"
+          COMPOSE_NAME="gatelink-compose-${VERSION}"
+          UI_DIR="${STAGE}/${UI_NAME}"
+          BUNDLE="${STAGE}/${COMPOSE_NAME}"
+
+          mkdir -p "${OUT}" "${UI_DIR}" "${BUNDLE}/backend" "${BUNDLE}/frontend/dist"
+
+          cp quarkus-gatelink-server/target/gatelink-server-runner.jar \
+            "${OUT}/gatelink-server-${VERSION}.jar"
+
+          cp -a quarkus-gatelink-webpush-ui/dist/gatelink-webpush-ui/browser/. "${UI_DIR}/"
+
+          cp "${OUT}/gatelink-server-${VERSION}.jar" "${BUNDLE}/backend/app.jar"
+          cp deploy/backend/application.properties "${BUNDLE}/backend/application.properties"
+          cp deploy/release/backend.Dockerfile "${BUNDLE}/backend/Dockerfile"
+
+          cp -a quarkus-gatelink-webpush-ui/dist/gatelink-webpush-ui/browser/. "${BUNDLE}/frontend/dist/"
+          cp quarkus-gatelink-webpush-ui/nginx.conf "${BUNDLE}/frontend/nginx.conf"
+          cp deploy/release/frontend.Dockerfile "${BUNDLE}/frontend/Dockerfile"
+
+          cp deploy/release/compose.yaml "${BUNDLE}/compose.yaml"
+          sed "s/^GATELINK_VERSION=.*/GATELINK_VERSION=${VERSION}/" .env.example > "${BUNDLE}/.env.example"
+          sed "s/@VERSION@/${VERSION}/g" deploy/release/README.md > "${BUNDLE}/README.md"
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" config --quiet
+
+      - name: Smoke test ready-to-run Compose bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION='${{ steps.meta.outputs.version }}'
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" build backend frontend
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" up -d --no-build --wait --wait-timeout 120
+
+          curl --fail --silent --show-error http://127.0.0.1:8081/healthz
+          curl --fail --silent --show-error http://127.0.0.1:8081/api/q/health/ready
+          curl --fail --silent --show-error http://127.0.0.1:8081/dashboard | grep -q '<app-root'
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" exec -T backend \
+            sh -c 'test "$(id -u)" = "10001" && test -w /opt/app/logs && test -w /opt/app/tmp'
+
+      - name: Print release Compose diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          VERSION='${{ steps.meta.outputs.version }}'
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+          if [[ -f "${BUNDLE}/compose.yaml" ]]; then
+            docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" ps -a || true
+            docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" logs --no-color --tail=300 || true
+          fi
+
+      - name: Stop release Compose stack
+        if: always()
+        shell: bash
+        run: |
+          VERSION='${{ steps.meta.outputs.version }}'
+          BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
+          if [[ -f "${BUNDLE}/compose.yaml" ]]; then
+            docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" down -v --remove-orphans || true
+          fi
+
+      - name: Create ZIP and TAR.GZ archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION='${{ steps.meta.outputs.version }}'
+          OUT="${GITHUB_WORKSPACE}/release-out"
+          STAGE="${GITHUB_WORKSPACE}/release-stage"
+          UI_NAME="gatelink-webpush-ui-${VERSION}"
+          COMPOSE_NAME="gatelink-compose-${VERSION}"
+
+          (
+            cd "${STAGE}"
+            zip -q -r "${OUT}/${UI_NAME}.zip" "${UI_NAME}"
+            tar -czf "${OUT}/${UI_NAME}.tar.gz" "${UI_NAME}"
+            zip -q -r "${OUT}/${COMPOSE_NAME}.zip" "${COMPOSE_NAME}"
+            tar -czf "${OUT}/${COMPOSE_NAME}.tar.gz" "${COMPOSE_NAME}"
+          )
+
+          (
+            cd "${OUT}"
+            sha256sum \
+              "gatelink-server-${VERSION}.jar" \
+              "${UI_NAME}.zip" \
+              "${UI_NAME}.tar.gz" \
+              "${COMPOSE_NAME}.zip" \
+              "${COMPOSE_NAME}.tar.gz" \
+              > SHA256SUMS
+          )
+
+          ls -lh "${OUT}"
+
+      - name: Keep artifacts for manual runs and diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatelink-release-${{ steps.meta.outputs.version }}
+          path: release-out/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Attach artifacts to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload '${{ steps.meta.outputs.tag }}' release-out/* --clobber
+
+      - name: Release summary
+        shell: bash
+        run: |
+          {
+            echo '## GateLink release artifacts'
+            echo
+            echo 'Version: `${{ steps.meta.outputs.version }}`'
+            echo
+            echo 'Generated:'
+            echo '- Quarkus uber-JAR'
+            echo '- Angular production ZIP'
+            echo '- Angular production TAR.GZ'
+            echo '- ready-to-run Docker Compose ZIP'
+            echo '- ready-to-run Docker Compose TAR.GZ'
+            echo '- SHA256SUMS'
+          } >> "${GITHUB_STEP_SUMMARY}"
