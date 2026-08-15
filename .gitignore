@@ -12,3 +12,15 @@ nb-configuration.xml
 
 # Avoid ignoring Maven wrapper jar file (.jar files are usually ignored)
 !/.mvn/wrapper/maven-wrapper.jar
+
+# Local Docker Compose environment and runtime state
+.env
+quarkus-gatelink-server/runtime/logs/*
+!quarkus-gatelink-server/runtime/logs/.gitkeep
+quarkus-gatelink-server/runtime/tmp/*
+!quarkus-gatelink-server/runtime/tmp/.gitkeep
+
+# Angular / Node build state
+quarkus-gatelink-webpush-ui/node_modules/
+quarkus-gatelink-webpush-ui/dist/
+quarkus-gatelink-webpush-ui/.angular/
