@@ -6,7 +6,12 @@ COPY pom.xml ./
 RUN mvn -B -DskipTests dependency:go-offline
 
 COPY src ./src
-RUN mvn -B -DskipTests package
+# Keep normal Maven/test packaging unchanged. The Docker artifact alone is
+# produced as an uber-JAR and named app-runner.jar.
+RUN mvn -B -DskipTests \
+    -Dquarkus.package.jar.type=uber-jar \
+    -Dquarkus.package.output-name=app \
+    package
 
 FROM eclipse-temurin:21-jre-noble
 
