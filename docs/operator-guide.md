@@ -1,290 +1,384 @@
 # GateLink operator guide
 
-This guide explains **what happens at runtime, in which order, and which component talks to which other component**.
+This document explains **what happens at runtime, in which order, and which component communicates with which other component**.
 
-It is intentionally operational rather than API-centric. An operator should be able to follow a request from the user and browser, through GateLink and PostgreSQL, to the browser vendor Push Service and back to the Service Worker.
-
-GateLink is a Java 21 / Quarkus application. Web Push payload encryption is delegated to the Java `nl.martijndwars:web-push` library with `Encoding.AES128GCM` selected explicitly. There is no legacy `aesgcm` compatibility path.
-
-## 1. Components and responsibilities
+The normal user path is HTTPS-first:
 
 ```text
-+----------------------+       +------------------------+
-| User                 |       | Operator / admin       |
-| clicks Subscribe     |       | sends notifications    |
-| receives notification|       | monitors the service   |
-+----------+-----------+       +-----------+------------+
-           |                               |
-           v                               | OIDC Bearer token
-+----------+-------------------------------+------------+
-| Browser / browser UI                                  |
-|                                                       |
-| - page / Angular application                          |
-| - Push API / PushManager                              |
-| - Service Worker                                      |
-+----------+----------------------+---------------------+
-           |                      |
-           | GateLink REST        | browser Push API
-           v                      v
-+----------+-----------+   +------+----------------------+
-| GateLink server      |   | Browser vendor Push Service|
-| Java 21 / Quarkus    |   | FCM / Mozilla / vendor    |
-|                      |   | infrastructure             |
-| REST                 |   +------+----------------------+
-| validation           |          |
-| OIDC / RBAC          |          | Web Push delivery
-| Web Push encryption  |          v
-| VAPID                |   +------+----------------------+
-| metrics / tracing    |   | Browser Service Worker     |
-+----------+-----------+   +-----------------------------+
-           |
-           | JDBC / JPA
-           v
-+----------+-----------+
-| PostgreSQL 18        |
-| PushSubscription data|
-+----------------------+
+Browser
+   |
+   | HTTPS :443
+   v
+quarkus-gatelink-webpush-ui
+Angular + Nginx
+   |
+   | /api/*
+   | HTTPS :8443
+   | Docker DNS: quarkus-gatelink-webpush-server
+   v
+quarkus-gatelink-webpush-server
+Quarkus / Java 21
+   |
+   | JDBC
+   v
+postgres :5432
 ```
 
-The important distinction is:
+Quarkus also makes outbound HTTPS requests directly to browser Push Services such as FCM or Mozilla/vendor infrastructure.
 
-- the **browser UI calls GateLink** for application REST operations;
-- the **browser Push API talks to the browser vendor Push Service** when creating a Push Subscription;
-- **GateLink later talks to that Push Service**, not directly to the browser;
-- the Push Service delivers the message to the browser's **Service Worker**.
+The Web Push crypto path is modern-only: `nl.martijndwars:web-push:5.1.2` is used with `Encoding.AES128GCM`; GateLink has no legacy `aesgcm` delivery path.
 
-## 2. What each component owns
+## 1. Fixed runtime names and ports
 
-| Component | Owns / knows | Does not own |
-| --- | --- | --- |
-| Browser UI | GateLink URL, public VAPID key, browser PushSubscription | VAPID private key |
-| Browser Push API | subscription lifecycle and vendor Push Service registration | GateLink database |
-| GateLink | REST API, VAPID key pair, validation, fan-out, encryption adapter, metrics | direct browser connection |
-| PostgreSQL | `endpoint`, `p256dh`, `auth` for each subscription | VAPID private key |
-| OIDC provider | admin identities and roles | browser PushSubscription data |
-| Push Service | vendor delivery endpoint and browser delivery infrastructure | GateLink database |
-| Service Worker | final browser-side push event | server-side secrets |
+The application containers intentionally use identical Compose service, container and hostname values:
 
-`p256dh` and `auth` are browser-generated Web Push key material and must be treated as sensitive subscription data even though they are not the GateLink VAPID private key.
+```text
+quarkus-gatelink-webpush-ui
+quarkus-gatelink-webpush-server
+```
 
-## 3. Server startup: step by step
+Ports:
 
-### Diagram
+| Component | Port | Purpose |
+| --- | ---: | --- |
+| UI | `80` HTTP | redirect normal user traffic to HTTPS; local `/healthz` remains available |
+| UI | `443` HTTPS | **normal user/browser entry point** |
+| Quarkus server | `8080` HTTP | optional direct REST/operations access |
+| Quarkus server | `8443` HTTPS | optional direct TLS REST/operations access and Nginx upstream |
+| PostgreSQL | `5432` | internal only; not published on the host |
+
+Nginx reaches Quarkus using:
+
+```text
+https://quarkus-gatelink-webpush-server:8443/
+```
+
+It never uses `localhost` for container-to-container traffic.
+
+## 2. Components and responsibilities
+
+```text
++-------------------------+
+| User                    |
+| opens UI / subscribes   |
+| sees notifications      |
++------------+------------+
+             |
+             | HTTPS :443
+             v
++------------+------------+
+| Browser                  |
+| - Angular UI             |
+| - Push API / SwPush      |
+| - Service Worker         |
++------+--------------+----+
+       |              |
+       | /api/*       | browser Push API
+       v              v
++------+----------+  +-------------------------+
+| Nginx / UI      |  | Browser Push Service    |
+| TLS termination |  | FCM / Mozilla / vendor  |
+| SPA + /api proxy|  +-----------+-------------+
++------+----------+              |
+       | HTTPS :8443             | Web Push delivery
+       v                         v
++------+----------------+  +-----+-------------------+
+| Quarkus server        |  | Browser Service Worker |
+| REST / OIDC / DB      |  +-------------------------+
+| VAPID / Web Push      |
+| metrics / tracing     |
++------+----------------+
+       |
+       | JDBC
+       v
++------+----------------+
+| PostgreSQL 18         |
+| subscription registry |
++-----------------------+
+```
+
+The important boundaries are:
+
+- the browser talks to the **UI HTTPS origin**, not directly to Docker hostnames;
+- Nginx proxies application REST calls to Quarkus over internal HTTPS;
+- the browser Push API talks to the browser vendor Push Service when creating a subscription;
+- GateLink stores subscription information in PostgreSQL;
+- when sending a notification, GateLink talks to the Push Service endpoint, not directly to the browser;
+- the Push Service later delivers to the browser Service Worker.
+
+## 3. Self-signed certificate lifecycle
+
+No TLS private key is stored in Git.
+
+### UI certificate
+
+On first start `quarkus-gatelink-webpush-ui` creates:
+
+```text
+/etc/nginx/tls/tls.crt
+/etc/nginx/tls/tls.key
+```
+
+and persists them in Docker volume `ui_tls`.
+
+### Server certificate
+
+On first start `quarkus-gatelink-webpush-server` creates:
+
+```text
+/opt/app/tls/tls.crt
+/opt/app/tls/tls.key
+```
+
+and persists them in `server_tls`.
+
+Default identities:
+
+```text
+UI_TLS_COMMON_NAME=quarkus-gatelink-webpush-ui
+UI_TLS_SAN=DNS:quarkus-gatelink-webpush-ui,DNS:localhost,IP:127.0.0.1
+
+SERVER_TLS_COMMON_NAME=quarkus-gatelink-webpush-server
+SERVER_TLS_SAN=DNS:quarkus-gatelink-webpush-server,DNS:localhost,IP:127.0.0.1
+```
+
+If users/operators access the host with another DNS name or IP, add it to the appropriate SAN list **before first start**.
+
+A self-signed certificate encrypts traffic but is not automatically trusted. Browser/operator clients must explicitly trust or accept it.
+
+Nginx uses encrypted HTTPS to Quarkus but disables certificate-chain verification for this self-signed internal mode. A deployment with an internal CA should enable upstream verification.
+
+## 4. Stack startup: step by step
 
 ```text
 Operator
    |
-   | starts PostgreSQL
+   | docker compose up -d --wait
    v
-PostgreSQL 18
+postgres
    |
-   | becomes healthy
+   | initialize data directory
+   | pg_isready -> healthy
    v
-Operator
+quarkus-gatelink-webpush-server
    |
-   | starts Quarkus
+   +-- entrypoint creates/reuses server TLS certificate
+   +-- Java starts
+   +-- datasource -> postgres:5432
+   +-- Flyway applies pending migrations
+   +-- Hibernate validates mappings
+   +-- VAPID identity loads/generates
+   +-- OIDC/security initializes
+   +-- metrics/tracing initialize
+   +-- HTTP :8080 starts
+   +-- HTTPS :8443 starts
+   |   /q/health/ready -> UP
    v
-GateLink
+quarkus-gatelink-webpush-ui
    |
-   +--> opens datasource connection -----------------> PostgreSQL
-   |
-   +--> Flyway validates/applies migrations ---------> PostgreSQL
-   |
-   +--> Hibernate validates Java mapping vs schema --> PostgreSQL
-   |
-   +--> loads configured VAPID key pair
-   |       or generates a temporary pair if none exists
-   |
-   +--> initializes OIDC / security
-   |
-   +--> initializes metrics / OpenTelemetry
-   |
-   `--> exposes HTTP endpoints
+   +-- entrypoint creates/reuses UI TLS certificate
+   +-- Nginx starts :80 and :443
+   +-- local /healthz -> healthy
+   v
+Stack ready
 ```
 
-### Exact sequence
+Exact sequence:
 
-1. The operator starts PostgreSQL.
-2. PostgreSQL exposes database `gatelink`.
-3. GateLink starts and creates the Quarkus PostgreSQL datasource.
-4. Flyway checks `flyway_schema_history` and applies any pending versioned migrations.
-5. Hibernate validates that the mapped entities match the database schema; Hibernate does not own schema creation.
-6. GateLink initializes its VAPID identity.
-7. If **both** `webpush.vapid.public-key` and `webpush.vapid.private-key` are configured, GateLink loads them.
-8. If only one of the two VAPID keys is configured, startup fails.
-9. If neither is configured, GateLink generates a temporary P-256 VAPID pair and logs a warning.
-10. Quarkus initializes OIDC security, validation, metrics and tracing.
-11. In development, Quarkus OIDC Dev Services can start Keycloak automatically; `alice` is configured with role `gatelink-admin`.
-12. The service begins accepting REST requests.
+1. Docker starts PostgreSQL using the pinned Docker Official Image `postgres:18.4`.
+2. PostgreSQL initializes/reuses the `postgres_data` volume.
+3. `pg_isready` must report healthy.
+4. Docker starts `quarkus-gatelink-webpush-server`.
+5. Its entrypoint checks `server_tls`.
+6. If the certificate/key do not exist, OpenSSL creates them from the configured CN/SAN values.
+7. Java starts `/opt/app/app.jar` as UID/GID `10001:10001`.
+8. Quarkus opens the JDBC datasource to `postgres:5432`.
+9. Flyway applies pending schema migrations.
+10. Hibernate validates the Java mappings against the schema.
+11. GateLink loads the VAPID public/private key pair. If both are absent, a temporary development pair is generated; production should use stable keys.
+12. Quarkus starts HTTP `8080` and HTTPS `8443`.
+13. The server healthcheck calls `https://127.0.0.1:8443/q/health/ready` with self-signed verification disabled.
+14. Only after the server is healthy does Docker start `quarkus-gatelink-webpush-ui`.
+15. The UI entrypoint creates/reuses its certificate in `ui_tls`.
+16. Nginx starts HTTP `80` and HTTPS `443`.
+17. Docker checks the UI's local HTTP `/healthz` endpoint.
+18. The stack is considered ready.
 
-### Operator warning: VAPID identity must be stable in production
+## 5. What PostgreSQL is for
 
-PostgreSQL persists browser subscriptions across restarts, but a browser subscription was created for a specific application-server public key. Therefore production GateLink must use a **stable VAPID key pair**.
+PostgreSQL is **not part of the Web Push protocol itself**. GateLink uses it as a durable browser subscription registry.
 
-```text
-PostgreSQL persistent + VAPID persistent   -> correct production setup
-PostgreSQL persistent + VAPID regenerated  -> subscriptions remain in DB,
-                                              but application identity changed
-```
-
-The automatically generated key pair is suitable for temporary development, not for a restart-safe production installation.
-
-## 4. Browser subscription registration: step by step
-
-This flow happens when a user enables notifications in the browser.
-
-### Sequence diagram
-
-```text
-User        Browser UI       GateLink       Push API       Push Service       PostgreSQL
- |              |               |              |                |                 |
- | Subscribe    |               |              |                |                 |
- |------------->|               |              |                |                 |
- |              | GET /keys/public             |                |                 |
- |              |-------------->|              |                |                 |
- |              | public VAPID key             |                |                 |
- |              |<--------------|              |                |                 |
- |              | permission / subscribe       |                |                 |
- |              |----------------------------->|                |                 |
- |              |               |              | register       |                 |
- |              |               |              |--------------->|                 |
- |              |               |              | PushSubscription                 |
- |              |               |              |<---------------|                 |
- |              | PushSubscription             |                |                 |
- |              |<-----------------------------|                |                 |
- |              | POST /subscriptions          |                |                 |
- |              |-------------->|              |                |                 |
- |              |               | validate     |                |                 |
- |              |               |----------------------------------------------->|
- |              |               |          INSERT ... ON CONFLICT UPDATE          |
- |              |               |<-----------------------------------------------|
- |              | HTTP 204      |              |                |                 |
- |              |<--------------|              |                |                 |
-```
-
-### Exact sequence
-
-1. The user opens the browser UI.
-2. The browser registers or activates the Service Worker used for push events.
-3. The user chooses to enable/subscribe to notifications.
-4. The UI calls `GET /keys/public` on GateLink.
-5. GateLink reads its current VAPID key pair from the in-memory key store.
-6. GateLink returns **only the public VAPID key**, in unpadded Base64URL form.
-7. The browser asks the user for notification permission if permission has not already been granted.
-8. The UI passes the public VAPID key to the browser Push API (`PushManager` or Angular `SwPush`).
-9. The browser Push API contacts the browser vendor Push Service.
-10. The Push Service creates or returns a subscription associated with this browser and application-server key.
-11. The browser receives a `PushSubscription` containing at least:
-    - `endpoint`: vendor Push Service URL;
-    - `p256dh`: browser public encryption key;
-    - `auth`: browser authentication secret.
-12. The browser UI sends that object to GateLink with `POST /subscriptions`.
-13. Before touching PostgreSQL, Jakarta Validation checks the request.
-14. GateLink requires an absolute HTTPS endpoint.
-15. GateLink requires canonical unpadded Base64URL key material.
-16. `p256dh` must decode to a 65-octet uncompressed P-256 public key.
-17. `auth` must decode to exactly 16 octets.
-18. Invalid input is rejected with HTTP `400` and is not stored.
-19. Valid input reaches `SubscriptionsStore`.
-20. PostgreSQL executes an atomic upsert keyed by `endpoint`:
-
-```sql
-INSERT INTO push_subscriptions (endpoint, p256dh, auth)
-VALUES (...)
-ON CONFLICT (endpoint) DO UPDATE SET
-    p256dh = EXCLUDED.p256dh,
-    auth = EXCLUDED.auth;
-```
-
-21. Registering the same endpoint again refreshes its keys instead of creating a duplicate.
-22. GateLink returns HTTP `204`.
-23. The subscription is now durable and survives a GateLink restart.
-
-## 5. What is stored in PostgreSQL
+Stored table:
 
 ```text
 push_subscriptions
-+----------+----------------------------------------------+
-| endpoint | TEXT PRIMARY KEY                             |
-| p256dh   | TEXT NOT NULL                                |
-| auth     | TEXT NOT NULL                                |
-+----------+----------------------------------------------+
++----------+---------------------------------+
+| endpoint | TEXT PRIMARY KEY                |
+| p256dh   | TEXT NOT NULL                   |
+| auth     | TEXT NOT NULL                   |
++----------+---------------------------------+
 ```
 
-The database does **not** need the VAPID private key. VAPID identity is server configuration, not subscription data.
+Meaning:
 
-To inspect registered endpoints locally:
+- `endpoint` identifies the browser vendor Push Service URL to which GateLink later sends;
+- `p256dh` is the browser's public encryption key;
+- `auth` is browser-generated Web Push authentication material.
 
-```bash
-docker compose exec postgres psql -U gatelink -d gatelink
-```
+PostgreSQL does **not** store:
 
-```sql
-SELECT endpoint FROM push_subscriptions ORDER BY endpoint;
-```
+- notification history;
+- a notification queue;
+- per-browser delivery acknowledgements;
+- the VAPID private key;
+- TLS private keys.
 
-## 6. Sending a notification: step by step
-
-This is the administrative fan-out flow.
-
-### Sequence diagram
+Operational shorthand:
 
 ```text
-Admin        OIDC          GateLink        PostgreSQL      web-push Java      Push Service
- |             |              |                 |                |                 |
- | get token   |              |                 |                |                 |
- |------------>|              |                 |                |                 |
- | token       |              |                 |                |                 |
- |<------------|              |                 |                |                 |
- | POST /notifications        |                 |                |                 |
- | Authorization: Bearer ...  |                 |                |                 |
- |--------------------------->|                 |                |                 |
- |             |              | validate token / role            |                 |
- |             |              | enforce 20/min rate limit        |                 |
- |             |              | validate payload                 |                 |
- |             |              | SELECT subscriptions             |                 |
- |             |              |---------------->|                |                 |
- |             |              | subscriptions  |                |                 |
- |             |              |<----------------|                |                 |
- |             |              | for each subscription            |                 |
- |             |              |------------------------------->|                 |
- |             |              |         AES128GCM body          |                 |
- |             |              |<-------------------------------|                 |
- |             |              | VAPID JWT + HTTP POST -------------------------->|
- |             |              |                                      HTTP status |
- |             |              |<-------------------------------------------------|
- |             |              | record Micrometer status                            |
- | HTTP 204    |              |                 |                |                 |
- |<---------------------------|                 |                |                 |
+PostgreSQL answers: "WHO can GateLink send to?"
+web-push Java answers: "HOW is this payload encrypted for that subscription?"
 ```
 
-### Exact sequence
+## 6. User opens the UI
 
-1. An administrator or trusted backend obtains an OIDC access token.
-2. The token must map to role `gatelink-admin`.
-3. The caller sends `POST /notifications` with `Content-Type: text/plain` and `Authorization: Bearer <token>`.
-4. Quarkus authentication validates the token.
-5. `@RolesAllowed("gatelink-admin")` checks authorization.
-6. Missing authentication normally results in HTTP `401`; an authenticated identity without the role is rejected by authorization.
-7. SmallRye Fault Tolerance enforces the current limit of **20 calls per minute** for the notification endpoint.
-8. Calls over the limit receive HTTP `429`.
-9. Jakarta Validation rejects a blank payload.
-10. GateLink also verifies the UTF-8 encoded payload size.
-11. The maximum plaintext payload is currently **3993 UTF-8 octets**.
-12. GateLink increments `webpush.messages.forwarded` once for the fan-out request.
-13. GateLink obtains the stable VAPID key pair from its key store.
-14. GateLink loads the current subscription list from PostgreSQL.
-15. The JPA persistence context is cleared before the read so the list reflects current database state.
-16. GateLink processes every returned subscription.
-17. For each subscription it constructs a Java notification object containing the stored subscription and the plaintext message.
-18. `EncryptionService` validates the browser `auth` material again before encryption.
-19. `EncryptionService` creates the library notification object for `nl.martijndwars:web-push`.
-20. GateLink invokes the library with `Encoding.AES128GCM` explicitly.
-21. The Java library performs the RFC 8291 / RFC 8188 payload cryptography and returns the encrypted body.
-22. GateLink extracts the Push Service origin from the subscription endpoint and uses it as the VAPID JWT audience.
-23. GateLink signs an ES256 VAPID JWT using the GateLink VAPID private key.
-24. GateLink increments `webpush.push.attempts{push_service="..."}`.
-25. GateLink sends an HTTPS POST to the exact subscription endpoint with:
+```text
+User
+  |
+  | https://host/
+  v
+Browser
+  |
+  | TLS :443
+  v
+quarkus-gatelink-webpush-ui / Nginx
+  |
+  | serves Angular static files
+  v
+Browser Angular application
+```
+
+Step by step:
+
+1. The user opens `https://<host>/`.
+2. The browser performs TLS with Nginx on port 443.
+3. With the supplied self-signed certificate, the browser must trust/accept that certificate.
+4. Nginx returns Angular `index.html` and generated assets.
+5. Angular starts in the browser.
+6. Angular registers its Service Worker.
+7. Angular uses same-origin `/api/...` URLs for GateLink calls.
+
+If the user enters `http://<host>/`, Nginx returns `308` to the HTTPS URL.
+
+## 7. Browser subscription registration: step by step
+
+### Full sequence
+
+```text
+User     Browser/Angular   Nginx UI     Quarkus server     Push API     Push Service   PostgreSQL
+ |             |              |              |                |             |             |
+ | Subscribe   |              |              |                |             |             |
+ |------------>|              |              |                |             |             |
+ |             | GET /api/keys/public        |                |             |             |
+ |             |------------->|              |                |             |             |
+ |             |              | HTTPS :8443 /keys/public      |             |             |
+ |             |              |------------->|                |             |             |
+ |             |              | public VAPID key              |             |             |
+ |             |              |<-------------|                |             |             |
+ |             |<-------------|              |                |             |             |
+ |             | request permission / subscription            |             |             |
+ |             |--------------------------------------------->|             |             |
+ |             |              |              |                | register    |             |
+ |             |              |              |                |------------>|             |
+ |             |              |              |                | subscription             |
+ |             |              |              |                |<------------|             |
+ |             | PushSubscription(endpoint,p256dh,auth)       |             |             |
+ |             |<---------------------------------------------|             |             |
+ |             | POST /api/subscriptions     |                |             |             |
+ |             |------------->|              |                |             |             |
+ |             |              | HTTPS :8443 /subscriptions    |             |             |
+ |             |              |------------->|                |             |             |
+ |             |              |              | validate       |             |             |
+ |             |              |              |------------------------------------------->|
+ |             |              |              | INSERT ... ON CONFLICT UPDATE              |
+ |             |              |              |<-------------------------------------------|
+ |             |              | HTTP 204     |                |             |             |
+ |             |<-------------|<-------------|                |             |             |
+```
+
+Exact sequence:
+
+1. User selects Subscribe.
+2. Angular calls `GET /api/keys/public` on the same HTTPS origin.
+3. Nginx strips `/api/` and calls `https://quarkus-gatelink-webpush-server:8443/keys/public`.
+4. GateLink returns only the public VAPID key.
+5. Angular asks the browser Push API to create/reuse a subscription using that public key.
+6. The browser Push API contacts the vendor Push Service.
+7. The browser obtains a `PushSubscription` containing `endpoint`, `p256dh` and `auth`.
+8. Angular sends it to `POST /api/subscriptions`.
+9. Nginx proxies to Quarkus `/subscriptions` over internal HTTPS.
+10. GateLink validates that `endpoint` is absolute HTTPS.
+11. `p256dh` must be canonical unpadded Base64URL and decode to a 65-byte uncompressed P-256 public key.
+12. `auth` must be canonical unpadded Base64URL and decode to 16 bytes.
+13. Invalid data returns `400` before persistence.
+14. Valid data reaches `SubscriptionsStore`.
+15. PostgreSQL executes an atomic upsert keyed by endpoint.
+16. Re-registering the same endpoint refreshes its key material rather than inserting a duplicate.
+17. GateLink returns `204`.
+18. The subscription now survives server/container restart because PostgreSQL is persistent.
+
+## 8. Sending a notification: step by step
+
+The normal administrative request path is also through the UI HTTPS origin:
+
+```text
+Admin/client
+   |
+   | POST https://host/api/notifications
+   | Authorization: Bearer <token>
+   | Content-Type: text/plain
+   v
+Nginx :443
+   |
+   | HTTPS :8443 /notifications
+   v
+Quarkus
+   |
+   +-- OIDC authentication
+   +-- gatelink-admin authorization
+   +-- 20/min rate limit
+   +-- payload validation
+   |
+   +--> PostgreSQL SELECT subscriptions
+   |
+   `--> for every subscription
+          |
+          +--> nl.martijndwars:web-push / AES128GCM
+          +--> GateLink VAPID JWT
+          +--> HTTPS POST to subscription Push Service
+          `--> Micrometer response-status metric
+```
+
+Exact sequence:
+
+1. An administrator or trusted calling service obtains an OIDC access token.
+2. The identity must have role `gatelink-admin`.
+3. Caller sends `POST /api/notifications` with the Bearer token and text payload.
+4. Nginx forwards it over HTTPS to Quarkus `/notifications`.
+5. Quarkus authenticates the token.
+6. `@RolesAllowed("gatelink-admin")` checks authorization.
+7. Unauthenticated requests are rejected; authenticated users without the role are forbidden.
+8. GateLink enforces the current 20 requests/minute notification rate limit.
+9. Blank payloads are rejected.
+10. Plaintext payload size is limited to 3993 UTF-8 bytes.
+11. GateLink loads current subscriptions from PostgreSQL.
+12. For each subscription, GateLink constructs the Java Web Push notification object.
+13. `EncryptionService` invokes `nl.martijndwars:web-push` explicitly with `Encoding.AES128GCM`.
+14. The library performs RFC 8291 / RFC 8188 payload encryption.
+15. GateLink derives the Push Service origin from the subscription endpoint for the VAPID audience.
+16. GateLink signs the RFC 8292 ES256 VAPID JWT using its stable VAPID private key.
+17. GateLink sends an HTTPS POST directly to the exact subscription endpoint.
+18. Request headers include:
 
 ```text
 TTL: 2419200
@@ -293,279 +387,254 @@ Authorization: vapid t=<JWT>, k=<VAPID-public-key>
 Content-Type: application/octet-stream
 ```
 
-26. `2419200` seconds is 28 days.
-27. GateLink intentionally does not emit the obsolete Web Push delivery headers `Encryption` or `Crypto-Key`.
-28. The Push Service returns an HTTP status.
-29. GateLink records it in `webpush.responses{status="..."}`.
-30. Any `2xx` status is considered successful by the internal Push Service client.
-31. A non-`2xx` Push Service status is recorded but does **not** currently produce a per-subscription error response to the original admin caller.
-32. If the loop completes without an exception, the REST endpoint returns HTTP `204`.
+19. GateLink intentionally does not emit obsolete `Encryption` or `Crypto-Key` delivery headers.
+20. The Push Service returns an HTTP status.
+21. GateLink records that status in Micrometer metrics.
+22. If the synchronous fan-out completes without an exception, the admin REST call returns `204`.
 
-## 7. Push Service to browser delivery: step by step
+## 9. Push Service → browser → user
 
-After GateLink has successfully handed the encrypted message to the vendor Push Service:
-
-1. GateLink is no longer in the direct delivery path.
-2. The Push Service identifies the browser/device represented by the subscription endpoint.
-3. The Push Service schedules or performs delivery according to the vendor/browser implementation and TTL.
-4. The browser receives the Web Push message.
-5. The registered Service Worker receives the `push` event.
-6. The Service Worker processes the payload and normally displays a user-visible notification.
-7. The user sees the notification.
-8. Notification click handling is browser/UI logic, not GateLink server logic.
+After the Push Service accepts GateLink's encrypted request:
 
 ```text
-GateLink
-   |
-   | encrypted Web Push HTTP POST
-   v
-Push Service
-   |
-   | vendor delivery channel
-   v
+quarkus-gatelink-webpush-server
+        |
+        | HTTPS Web Push
+        v
+Browser Push Service
+        |
+        | vendor delivery channel
+        v
 Browser
-   |
-   | push event
-   v
+        |
+        | push event
+        v
 Service Worker
-   |
-   | showNotification(...)
-   v
+        |
+        | showNotification(...)
+        v
 User
 ```
 
-A successful response from the Push Service means the Push Service **accepted the request**. It is not the same thing as an application-level acknowledgement from the user or Service Worker.
+1. GateLink is no longer in the direct delivery path after handing the message to the Push Service.
+2. The Push Service identifies the browser/device associated with the endpoint.
+3. It delivers according to vendor/browser behavior and TTL.
+4. The browser wakes/invokes the registered Service Worker.
+5. The Service Worker receives the `push` event.
+6. The Service Worker displays the notification.
+7. Notification click behavior is handled by browser/UI logic.
 
-## 8. Unsubscribe: step by step
+A Push Service `2xx` means **the Push Service accepted GateLink's request**. It does not prove that the browser displayed the notification or that the user saw/clicked it.
 
-GateLink's browser-facing unsubscribe removes the durable server record for a known endpoint.
-
-```text
-User / Browser UI
-      |
-      | knows its PushSubscription.endpoint
-      |
-      | Base64URL-encodes endpoint
-      v
-DELETE /subscriptions/{encodedEndpoint}
-      |
-      v
-GateLink
-      |
-      | validate path format and size
-      | Base64URL decode
-      v
-SubscriptionsStore
-      |
-      | DELETE by endpoint primary key
-      v
-PostgreSQL
-```
-
-1. The browser UI obtains the endpoint of its current Push Subscription.
-2. The UI Base64URL-encodes the endpoint for use as a path segment.
-3. The UI calls `DELETE /subscriptions/{encodedEndpoint}`.
-4. GateLink rejects blank, oversized or non-Base64URL path input.
-5. GateLink decodes the endpoint.
-6. `SubscriptionsStore.remove(endpoint)` deletes that primary-key row from PostgreSQL.
-7. This endpoint is intentionally browser-facing and currently does not require the admin role.
-8. Browser Push API unsubscription and GateLink database removal are separate responsibilities; frontend code should perform the browser-side subscription lifecycle as well.
-
-## 9. Administrative subscription operations
-
-### List subscriptions
-
-`GET /subscriptions` requires `gatelink-admin`.
-
-Step by step:
-
-1. Admin sends an OIDC Bearer token.
-2. Quarkus authenticates the identity.
-3. Role `gatelink-admin` is checked.
-4. GateLink reads all current records from PostgreSQL.
-5. GateLink returns an array containing the endpoint strings.
-
-### Remove all subscriptions
-
-`DELETE /subscriptions` also requires `gatelink-admin`.
-
-1. Admin authenticates with OIDC.
-2. GateLink checks `gatelink-admin`.
-3. `SubscriptionsStore.removeAll()` deletes all rows.
-4. Browser-side subscriptions are not remotely cancelled by this database operation; the GateLink server simply forgets them.
-
-## 10. Security boundaries
+## 10. Unsubscribe: step by step
 
 ```text
-PUBLIC BROWSER FLOW
--------------------
-GET    /keys/public
-POST   /subscriptions
-DELETE /subscriptions/{encodedEndpoint}
-
-ADMINISTRATIVE FLOW
--------------------
-GET    /subscriptions
-DELETE /subscriptions
-POST   /notifications
-          |
-          +-- OIDC authentication
-          +-- gatelink-admin role
-          `-- 20/minute rate limit for notification fan-out
+Browser Angular
+   |
+   | current PushSubscription.endpoint
+   | Base64URL encode endpoint
+   v
+DELETE /api/subscriptions/{encodedEndpoint}
+   |
+   v
+Nginx :443
+   |
+   | HTTPS :8443
+   v
+Quarkus
+   |
+   | validate/decode endpoint
+   v
+PostgreSQL DELETE
+   |
+   v
+Angular SwPush.unsubscribe()
 ```
 
-The public endpoints are public because they participate in the browser subscription lifecycle. They are still strictly validated.
+1. Angular reads the current browser subscription.
+2. It Base64URL-encodes the endpoint for the REST path.
+3. It asks GateLink to remove the stored subscription.
+4. GateLink validates and decodes the endpoint.
+5. PostgreSQL removes the row keyed by that endpoint.
+6. After server-side removal succeeds, Angular asks the browser Push API to unsubscribe locally.
 
-## 11. What the operator can monitor
+Server-side deletion and browser Push API unsubscription are distinct operations.
+
+## 11. Administrative subscription operations
+
+Through the normal HTTPS origin:
+
+```text
+GET    /api/subscriptions    -> list endpoints           -> gatelink-admin
+DELETE /api/subscriptions    -> remove all subscriptions -> gatelink-admin
+```
+
+Direct Quarkus equivalents omit `/api` and may be called on 8080 or 8443.
+
+## 12. Direct Quarkus REST access
+
+Normal users should stay on HTTPS 443 via Nginx. Operators may deliberately access Quarkus directly:
+
+```text
+HTTP  http://host:8080/
+HTTPS https://host:8443/
+```
+
+Examples:
+
+```bash
+curl http://localhost:8080/q/health/ready
+curl -k https://localhost:8443/q/health/ready
+curl -k https://localhost:8443/keys/public
+```
+
+For direct HTTPS from another machine name/IP, that name/IP must be present in `SERVER_TLS_SAN` when the certificate is generated.
+
+## 13. OIDC behavior
+
+The Docker stack contains no identity-provider container. `.env.example` therefore defaults to:
+
+```text
+OIDC_ENABLED=false
+OIDC_CLIENT_ID=quarkus-gatelink-webpush-server
+```
+
+This is convenient for a self-contained local boot, but production administrative endpoints require a configured external OIDC issuer and role `gatelink-admin`.
+
+When OIDC is enabled, the issuer is external to the UI/server/PostgreSQL Compose stack.
+
+## 14. VAPID identity
+
+PostgreSQL persistence alone is not sufficient for restart-safe production Web Push. VAPID identity must also remain stable.
+
+```text
+PostgreSQL persistent + VAPID persistent   -> correct
+PostgreSQL persistent + VAPID regenerated  -> DB rows remain,
+                                              application-server identity changed
+```
+
+Production should set:
+
+```text
+WEBPUSH_VAPID_PUBLIC_KEY
+WEBPUSH_VAPID_PRIVATE_KEY
+WEBPUSH_VAPID_SUBJECT
+```
+
+The VAPID private key is server configuration/secret material; it is never stored in PostgreSQL or sent to Angular.
+
+## 15. Health, logs and metrics
 
 ### Health
 
 ```text
-GET /q/health
-```
-
-Use this for service health checks.
-
-### Prometheus / Micrometer metrics
-
-```text
-GET /q/metrics
-```
-
-GateLink-specific counters currently include:
-
-| Metric | Meaning |
-| --- | --- |
-| `webpush.messages.forwarded` | notification fan-out requests accepted for processing |
-| `webpush.push.attempts` with `push_service` tag | individual sends attempted by Push Service host |
-| `webpush.responses` with `status` tag | HTTP status codes returned by Push Services |
-
-Example operational interpretation:
-
-```text
-webpush.messages.forwarded rises
-        |
-        +-- webpush.push.attempts does not rise
-        |      -> probably no subscriptions in PostgreSQL
-        |
-        +-- attempts rise, responses mostly 2xx
-        |      -> Push Services are accepting requests
-        |
-        `-- responses contain 4xx/5xx
-               -> inspect subscription validity / Push Service response pattern
+UI through HTTPS:             https://host/healthz
+UI -> Quarkus readiness:      https://host/api/q/health/ready
+Direct Quarkus HTTP:          http://host:8080/q/health/ready
+Direct Quarkus HTTPS:         https://host:8443/q/health/ready
 ```
 
 ### Logs
 
-Development and test profiles use human-readable console logs. Production console logging is configured as structured JSON.
-
-### Tracing
-
-OpenTelemetry is enabled, including JDBC telemetry. Dev/test do not attempt OTLP export unless configured.
-
-### OpenAPI
-
-```text
-GET /q/openapi
-GET /q/swagger-ui    # dev/test
+```bash
+docker compose logs -f quarkus-gatelink-webpush-ui
+docker compose logs -f quarkus-gatelink-webpush-server
+docker compose logs -f postgres
 ```
 
-## 12. HTTP outcomes an operator should recognize
+Quarkus also writes `/opt/app/logs/application.log`, mapped to the host in the source Compose deployment.
 
-| Situation | Expected behavior |
-| --- | --- |
-| valid browser subscription | `POST /subscriptions` -> `204` |
-| malformed endpoint/key/auth | `POST /subscriptions` -> `400` |
-| admin endpoint without identity | normally `401` |
-| authenticated caller without required role | authorization rejected |
-| notification rate limit exceeded | `429` |
-| blank / too-large notification | `400` |
-| no registered subscriptions | notification call completes without Push Service sends |
-| Push Service returns non-2xx | status is counted; no per-subscription result is returned to admin today |
-| Push Service network I/O fails | send throws and current fan-out request fails |
+### Metrics
 
-## 13. Current failure semantics
+Useful GateLink counters include:
 
-These details are important when operating the current implementation.
+```text
+webpush.messages.forwarded
+webpush.push.attempts{push_service="..."}
+webpush.responses{status="..."}
+```
 
-### No automatic retry
+Management endpoints are available directly under `/q/...` and through Nginx under `/api/q/...`.
 
-GateLink does not automatically retry Push Service sends. This avoids accidental duplicate delivery without an explicit retry policy.
+## 16. Common HTTP outcomes
 
-### No automatic removal of 404 / 410 subscriptions
+| Where | Status | Operator meaning |
+| --- | ---: | --- |
+| UI HTTP `:80` | `308` | expected redirect to HTTPS |
+| subscription registration | `204` | subscription stored/upserted |
+| invalid subscription | `400` | validation rejected before persistence |
+| protected API without valid authentication | `401` / authorization rejection | OIDC/authentication problem |
+| authenticated caller without role | authorization rejection | missing `gatelink-admin` |
+| rate limit | `429` | notification caller exceeded configured rate |
+| Push Service | `2xx` | Push Service accepted this Web Push request |
+| Push Service | non-`2xx` | remote Push Service rejected this particular send |
 
-A Push Service may report an expired or invalid subscription with statuses such as `404` or `410`. GateLink currently records the response status in metrics but does not automatically delete that PostgreSQL row.
+## 17. Current failure semantics
 
-This is a candidate for future lifecycle hardening, but operators should not assume it happens today.
+Operators must not infer behavior that is not implemented:
 
-### A network exception can stop the current fan-out
+- GateLink does not automatically retry failed Push Service calls;
+- GateLink does not automatically remove a stored subscription when a Push Service returns `404` or `410`;
+- `POST /notifications` does not return a per-browser delivery report;
+- synchronous fan-out means a network I/O exception can stop later sends in the current request;
+- Push Service acceptance is not end-user acknowledgement;
+- PostgreSQL is not a queue and cannot replay missed notifications.
 
-The JDK HTTP client uses a 10-second connect timeout and a 30-second request timeout. An I/O failure or interruption throws an exception. Because subscriptions are currently processed in the request thread, such an exception can terminate the current fan-out before later subscriptions are processed.
+## 18. Certificate troubleshooting
 
-### REST success is not browser acknowledgement
+Inspect the generated UI certificate:
 
-The administrative `POST /notifications` does not return a delivery report per browser. A `204` means the GateLink request completed without an exception; it does not prove that every user saw a notification.
+```bash
+docker compose exec quarkus-gatelink-webpush-ui \
+  openssl x509 -in /etc/nginx/tls/tls.crt \
+  -noout -subject -issuer -dates -ext subjectAltName
+```
 
-## 14. End-to-end example from an empty installation
+Inspect the server certificate:
 
-This is the complete lifecycle in one list.
+```bash
+docker compose exec quarkus-gatelink-webpush-server \
+  openssl x509 -in /opt/app/tls/tls.crt \
+  -noout -subject -issuer -dates -ext subjectAltName
+```
 
-1. Operator starts PostgreSQL.
-2. Operator starts GateLink.
-3. Flyway creates or validates the subscription schema.
-4. GateLink loads a stable VAPID pair (production) or generates a temporary one (development).
-5. User opens the browser UI.
-6. Browser registers the Service Worker.
-7. User clicks Subscribe and grants notification permission.
-8. Browser UI calls `GET /keys/public`.
-9. GateLink returns the VAPID public key.
-10. Browser Push API contacts FCM/Mozilla/vendor Push Service.
-11. Push Service returns `endpoint`, `p256dh`, `auth` to the browser.
-12. Browser UI sends them to `POST /subscriptions`.
-13. GateLink validates the subscription.
-14. PostgreSQL stores/upserts it.
-15. Later, an admin obtains an OIDC token carrying `gatelink-admin`.
-16. Admin calls `POST /notifications` with a text payload.
-17. GateLink validates authentication, authorization, rate limit and payload size.
-18. GateLink reads subscriptions from PostgreSQL.
-19. For each subscription, GateLink asks the Java `web-push` library to create an `aes128gcm` encrypted body.
-20. GateLink creates the VAPID JWT.
-21. GateLink sends the encrypted request to the subscription's vendor Push Service URL.
-22. GateLink records the returned status in Micrometer metrics.
-23. Push Service delivers the message to the browser.
-24. Browser Service Worker receives the push event.
-25. Service Worker displays the notification.
-26. User sees or clicks the notification.
+If SANs must change, stop the stack and remove only the relevant TLS volume before restarting. Preserve `postgres_data`.
 
-## 15. Production operator checklist
+## 19. PostgreSQL inspection
 
-Before treating the service as production-ready, verify all of the following:
+Open `psql` without exposing port 5432:
 
-- [ ] PostgreSQL data is persistent and backed up.
-- [ ] `GATELINK_DB_URL`, user and password point to the intended production database.
-- [ ] a stable VAPID public/private key pair is configured.
-- [ ] the VAPID private key is stored as a secret and is not exposed to frontend code.
-- [ ] the VAPID subject is a valid operational contact URI such as `mailto:...`.
-- [ ] `GATELINK_OIDC_AUTH_SERVER_URL` and client ID point to the production identity provider.
-- [ ] the admin identity receives `gatelink-admin`.
-- [ ] production CORS origins are explicit.
-- [ ] `/q/health` is monitored.
-- [ ] `/q/metrics` is scraped and Push Service error statuses are alerted on.
-- [ ] structured logs are collected centrally.
-- [ ] OpenTelemetry export is configured if distributed tracing is required.
-- [ ] network policy / SSRF controls restrict outbound access appropriately for Push Service endpoints.
-- [ ] operators understand that 404/410 subscriptions are not automatically removed yet.
-- [ ] real-browser delivery is tested with the browser vendors that must be supported.
+```bash
+docker compose exec postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+```
 
-## 16. Related documentation
+Useful query:
 
-- [`../README.md`](../README.md) — repository overview and quick start.
-- [`../quarkus-gatelink-webpush-server/README.md`](../quarkus-gatelink-webpush-server/README.md) — Java/Quarkus server implementation and configuration.
-- [`../quarkus-gatelink-webpush-ui/README.md`](../quarkus-gatelink-webpush-ui/README.md) — browser-side responsibilities.
-- [`integration-examples.md`](integration-examples.md) — Java and TypeScript integration examples.
+```sql
+SELECT endpoint FROM push_subscriptions ORDER BY endpoint;
+```
 
-## Operator network entry points
+Avoid displaying `p256dh` and `auth` unnecessarily in operator logs or screenshots.
 
-Normal users enter GateLink through `https://<host>/` on port `443` served by `quarkus-gatelink-webpush-ui`; port `80` redirects to HTTPS. The UI reaches Quarkus internally as `https://quarkus-gatelink-webpush-server:8443/`, never through container `localhost`.
+## 20. Production checklist
 
-Direct Quarkus access is additionally available for operators on HTTP `8080` and HTTPS `8443`. HTTPS uses the generated self-signed certificate unless the deployment replaces it with trusted PKI material.
+Before production use verify:
+
+- [ ] users access the UI through HTTPS 443;
+- [ ] `UI_TLS_SAN` contains the browser-facing hostname/IP;
+- [ ] `SERVER_TLS_SAN` contains `quarkus-gatelink-webpush-server` and every hostname/IP used for direct HTTPS access;
+- [ ] self-signed certificates are explicitly trusted, or replaced with organizational/public CA certificates;
+- [ ] PostgreSQL `postgres_data` is persistent and backed up;
+- [ ] `POSTGRES_PASSWORD` is not the example value;
+- [ ] stable VAPID public/private keys are configured and backed up securely;
+- [ ] the VAPID private key is not exposed to Angular, logs or PostgreSQL;
+- [ ] OIDC is enabled/configured before protected administrative endpoints are exposed;
+- [ ] OIDC client ID is `quarkus-gatelink-webpush-server` unless the external IdP intentionally uses another registered client ID;
+- [ ] admin identities receive `gatelink-admin`;
+- [ ] PostgreSQL port 5432 is not published;
+- [ ] direct Quarkus ports 8080/8443 are allowed by firewall/network policy only where operationally intended;
+- [ ] `/q/health/ready` and Push Service response metrics are monitored;
+- [ ] no TLS/VAPID/database private secret is committed to Git;
+- [ ] database backup/restore has been tested;
+- [ ] operators understand that no automatic Push Service retry or `404/410` cleanup currently exists.
