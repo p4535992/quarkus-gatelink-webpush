@@ -1,0 +1,11 @@
+.git
+.github
+docs
+data
+.env
+LICENSE
+*.md
+quarkus-gatelink-webpush-server
+quarkus-gatelink-webpush-ui/node_modules
+quarkus-gatelink-webpush-ui/dist
+quarkus-gatelink-webpush-ui/.angular

@@ -16,10 +16,8 @@ services:
       start_period: 10s
     volumes:
       - postgres_data:/var/lib/postgresql
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
   quarkus-gatelink-webpush-server:
     container_name: quarkus-gatelink-webpush-server
@@ -49,9 +47,9 @@ services:
       GATELINK_TLS_SAN: ${SERVER_TLS_SAN:-DNS:quarkus-gatelink-webpush-server,DNS:localhost,IP:127.0.0.1}
       GATELINK_TLS_DAYS: ${TLS_DAYS:-825}
     volumes:
-      - ./deploy/server/application.properties:/opt/app/config/application.properties:ro
-      - ./quarkus-gatelink-webpush-server/runtime/logs:/opt/app/logs
-      - ./quarkus-gatelink-webpush-server/runtime/tmp:/opt/app/tmp
+      - ./quarkus-gatelink-webpush-server/application.properties:/opt/app/config/application.properties:ro
+      - ./data/quarkus-gatelink-webpush-server/logs:/opt/app/logs
+      - ./data/quarkus-gatelink-webpush-server/tmp:/opt/app/tmp
       - server_tls:/opt/app/tls
     ports:
       - "8080:8080"
@@ -62,17 +60,15 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
   quarkus-gatelink-webpush-ui:
     container_name: quarkus-gatelink-webpush-ui
     hostname: quarkus-gatelink-webpush-ui
     build:
-      context: ./quarkus-gatelink-webpush-ui
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: quarkus-gatelink-webpush-ui/Dockerfile
     image: quarkus-gatelink-webpush-ui:${GATELINK_VERSION:-local}
     restart: unless-stopped
     depends_on:
@@ -86,6 +82,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
+      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ui_tls:/etc/nginx/tls
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
@@ -93,10 +90,8 @@ services:
       timeout: 3s
       retries: 6
       start_period: 5s
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
 volumes:
   postgres_data:
