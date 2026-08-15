@@ -378,14 +378,19 @@ jobs:
         run: |
           VERSION='${{ steps.meta.outputs.version }}'
           BUNDLE="${GITHUB_WORKSPACE}/release-stage/quarkus-gatelink-webpush-compose-${VERSION}"
+          DATA_DIR="${BUNDLE}/data/quarkus-gatelink-webpush-server"
+
           if [[ -f "${BUNDLE}/docker-compose.yml" ]]; then
             docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/docker-compose.yml" down -v --remove-orphans || true
           fi
 
           # The smoke test gives the bind-mounted data tree to UID/GID 10001 so
-          # Quarkus can write logs/tmp. Restore it to the runner before ZIP/TAR.
-          if [[ -d "${BUNDLE}/data" ]]; then
-            sudo chown -R "$(id -u):$(id -g)" "${BUNDLE}/data" || true
+          # Quarkus can write into it. Give it back to the runner, then remove
+          # smoke-test log/cache content: released data directories must be clean.
+          if [[ -d "${DATA_DIR}" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "${DATA_DIR}" || true
+            find "${DATA_DIR}/logs" -mindepth 1 -delete 2>/dev/null || true
+            find "${DATA_DIR}/tmp" -mindepth 1 -delete 2>/dev/null || true
           fi
 
       - name: Create ZIP and TAR.GZ archives
