@@ -352,11 +352,13 @@ Keeping the source copy outside the Maven module is important: it separates Dock
 
 ## 10. PostgreSQL
 
-The database uses the explicitly pinned image:
+The database uses the pinned **Docker Official Image**:
 
 ```text
-postgres:18.4-alpine3.24
+postgres:18.4
 ```
+
+This is the official `library/postgres` image. The unqualified `18.4` tag currently selects the official Debian-based PostgreSQL 18.4 image rather than an Alpine variant.
 
 It is not exposed on a host port.
 
