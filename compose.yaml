@@ -44,7 +44,7 @@ services:
       WEBPUSH_VAPID_SUBJECT: ${WEBPUSH_VAPID_SUBJECT:-mailto:admin@example.com}
       OTEL_EXPORT_ENABLED: ${OTEL_EXPORT_ENABLED:-false}
     volumes:
-      - ./quarkus-gatelink-server/config/application.properties:/opt/app/config/application.properties:ro
+      - ./deploy/backend/application.properties:/opt/app/config/application.properties:ro
       - ./quarkus-gatelink-server/runtime/logs:/opt/app/logs
       - ./quarkus-gatelink-server/runtime/tmp:/opt/app/tmp
     expose:
