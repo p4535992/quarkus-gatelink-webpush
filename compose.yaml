@@ -40,7 +40,7 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-production}
       OIDC_ENABLED: ${OIDC_ENABLED:-false}
       OIDC_AUTH_SERVER_URL: ${OIDC_AUTH_SERVER_URL:-https://id.example.invalid/realms/gatelink}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-gatelink-server}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-quarkus-gatelink-webpush-server}
       WEBPUSH_VAPID_PUBLIC_KEY: ${WEBPUSH_VAPID_PUBLIC_KEY:-}
       WEBPUSH_VAPID_PRIVATE_KEY: ${WEBPUSH_VAPID_PRIVATE_KEY:-}
       WEBPUSH_VAPID_SUBJECT: ${WEBPUSH_VAPID_SUBJECT:-mailto:admin@example.com}
