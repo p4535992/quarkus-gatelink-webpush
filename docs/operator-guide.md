@@ -560,6 +560,12 @@ Before treating the service as production-ready, verify all of the following:
 ## 16. Related documentation
 
 - [`../README.md`](../README.md) — repository overview and quick start.
-- [`../quarkus-gatelink-server/README.md`](../quarkus-gatelink-server/README.md) — Java/Quarkus server implementation and configuration.
+- [`../quarkus-gatelink-webpush-server/README.md`](../quarkus-gatelink-webpush-server/README.md) — Java/Quarkus server implementation and configuration.
 - [`../quarkus-gatelink-webpush-ui/README.md`](../quarkus-gatelink-webpush-ui/README.md) — browser-side responsibilities.
 - [`integration-examples.md`](integration-examples.md) — Java and TypeScript integration examples.
+
+## Operator network entry points
+
+Normal users enter GateLink through `https://<host>/` on port `443` served by `quarkus-gatelink-webpush-ui`; port `80` redirects to HTTPS. The UI reaches Quarkus internally as `https://quarkus-gatelink-webpush-server:8443/`, never through container `localhost`.
+
+Direct Quarkus access is additionally available for operators on HTTP `8080` and HTTPS `8443`. HTTPS uses the generated self-signed certificate unless the deployment replaces it with trusted PKI material.

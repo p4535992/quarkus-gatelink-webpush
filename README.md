@@ -17,7 +17,7 @@ The protocol implementation is intentionally **modern-only**:
 | [`docs/docker-deployment.md`](docs/docker-deployment.md) | Docker/Compose deployment, permissions, Nginx proxy, persistence and updates |
 | [`docs/webpush-java.md`](docs/webpush-java.md) | selected Java Web Push library and integration boundary |
 | [`docs/integration-examples.md`](docs/integration-examples.md) | Java and TypeScript API integration examples |
-| [`quarkus-gatelink-server/README.md`](quarkus-gatelink-server/README.md) | Quarkus server internals |
+| [`quarkus-gatelink-webpush-server/README.md`](quarkus-gatelink-webpush-server/README.md) | Quarkus server internals |
 | [`quarkus-gatelink-webpush-ui/README.md`](quarkus-gatelink-webpush-ui/README.md) | Angular/browser behavior |
 
 ## Repository structure
@@ -29,7 +29,7 @@ The protocol implementation is intentionally **modern-only**:
 ├── deploy/
 │   └── backend/
 │       └── application.properties
-├── quarkus-gatelink-server/
+├── quarkus-gatelink-webpush-server/
 │   ├── Dockerfile
 │   ├── runtime/logs/
 │   ├── runtime/tmp/
@@ -42,7 +42,7 @@ The protocol implementation is intentionally **modern-only**:
     └── src/
 ```
 
-The container runtime configuration intentionally lives outside the Quarkus module. If a file named `config/application.properties` were kept under `quarkus-gatelink-server/`, normal Maven/dev/test executions could load Docker-only settings such as the hostname `postgres`. Compose instead mounts `deploy/backend/application.properties` into the standard runtime path `/opt/app/config/application.properties`.
+The container runtime configuration intentionally lives outside the Quarkus module. If a file named `config/application.properties` were kept under `quarkus-gatelink-webpush-server/`, normal Maven/dev/test executions could load Docker-only settings such as the hostname `postgres`. Compose instead mounts `deploy/server/application.properties` into the standard runtime path `/opt/app/config/application.properties`.
 
 ## Production-style Docker quick start
 
@@ -70,10 +70,10 @@ Prepare the host:
 
 ```bash
 cp .env.example .env
-mkdir -p quarkus-gatelink-server/runtime/logs
-mkdir -p quarkus-gatelink-server/runtime/tmp
-sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/logs
-sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/tmp
+mkdir -p quarkus-gatelink-webpush-server/runtime/logs
+mkdir -p quarkus-gatelink-webpush-server/runtime/tmp
+sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/logs
+sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/tmp
 ```
 
 Build and start:
@@ -337,9 +337,9 @@ Persistent data:
 | Data | Location |
 | --- | --- |
 | browser subscriptions | Docker named volume `postgres_data` |
-| Quarkus file logs | `quarkus-gatelink-server/runtime/logs` |
-| Quarkus temp | `quarkus-gatelink-server/runtime/tmp` |
-| external runtime config | `deploy/backend/application.properties` |
+| Quarkus file logs | `quarkus-gatelink-webpush-server/runtime/logs` |
+| Quarkus temp | `quarkus-gatelink-webpush-server/runtime/tmp` |
+| external runtime config | `deploy/server/application.properties` |
 
 ## Local Java development
 
@@ -347,7 +347,7 @@ For backend-only development/tests, PostgreSQL can still be started separately:
 
 ```bash
 docker compose up -d postgres
-cd quarkus-gatelink-server
+cd quarkus-gatelink-webpush-server
 mvn clean verify
 mvn quarkus:dev
 ```
@@ -383,3 +383,11 @@ See [`docs/operator-guide.md`](docs/operator-guide.md) for the complete operatio
 - Angular 22 + TypeScript
 - Nginx
 - Docker / Docker Compose
+
+## HTTPS, container names and direct API ports
+
+The normal user entry point is **HTTPS 443** on `quarkus-gatelink-webpush-ui`. HTTP 80 exists only to redirect to HTTPS. Nginx proxies `/api/` over the private Docker network to `https://quarkus-gatelink-webpush-server:8443/`.
+
+Quarkus intentionally exposes `http://localhost:8080` and `https://localhost:8443` for direct REST/operations access. The fixed Docker service/container/hostname identities are `quarkus-gatelink-webpush-ui` and `quarkus-gatelink-webpush-server`.
+
+On first start each container creates its own self-signed certificate and persists it in a Docker volume. Configure `UI_TLS_SAN` and `SERVER_TLS_SAN` before first start when clients use another hostname or IP. Self-signed certificates must be explicitly trusted/accepted.

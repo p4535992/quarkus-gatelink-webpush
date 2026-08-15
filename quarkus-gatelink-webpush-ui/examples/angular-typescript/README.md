@@ -29,7 +29,7 @@ GateLinkWebPushService
       | GET /keys/public                           | POST /subscriptions
       | DELETE /subscriptions/{endpoint}           |
       v                                            v
-quarkus-gatelink-server ------------------------> PostgreSQL
+quarkus-gatelink-webpush-server ------------------------> PostgreSQL
       ^
       |
       | VAPID public key
@@ -166,7 +166,7 @@ docker compose up -d postgres
 Start GateLink:
 
 ```bash
-cd quarkus-gatelink-server
+cd quarkus-gatelink-webpush-server
 mvn quarkus:dev
 ```
 
@@ -193,7 +193,7 @@ Angular SwPush / browser subscription
         |
         | POST /subscriptions
         v
-quarkus-gatelink-server
+quarkus-gatelink-webpush-server
         |
         | RFC 8291 / RFC 8188 aes128gcm
         | RFC 8292 VAPID

@@ -158,5 +158,5 @@ PostgreSQL is not used by the library itself and is not required by the Web Push
 See also:
 
 - [`operator-guide.md`](operator-guide.md) for the complete runtime lifecycle;
-- [`../quarkus-gatelink-server/README.md`](../quarkus-gatelink-server/README.md) for server internals;
+- [`../quarkus-gatelink-webpush-server/README.md`](../quarkus-gatelink-webpush-server/README.md) for server internals;
 - [`../README.md`](../README.md) for the architecture overview.

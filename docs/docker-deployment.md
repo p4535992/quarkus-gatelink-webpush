@@ -37,7 +37,7 @@ quarkus-gatelink-webpush/
 │   └── backend/
 │       └── application.properties
 │
-├── quarkus-gatelink-server/
+├── quarkus-gatelink-webpush-server/
 │   ├── Dockerfile
 │   ├── .dockerignore
 │   ├── pom.xml
@@ -60,12 +60,12 @@ quarkus-gatelink-webpush/
     └── src/
 ```
 
-The container configuration source deliberately lives in `deploy/backend/`, outside the Quarkus module. Quarkus treats `$PWD/config/application.properties` as external configuration; keeping Docker-only settings under `quarkus-gatelink-server/config/` would therefore risk loading `postgres` and container environment placeholders during ordinary Maven/dev/test runs.
+The container configuration source deliberately lives in `deploy/server/`, outside the Quarkus module. Quarkus treats `$PWD/config/application.properties` as external configuration; keeping Docker-only settings under `quarkus-gatelink-webpush-server/config/` would therefore risk loading `postgres` and container environment placeholders during ordinary Maven/dev/test runs.
 
 Compose mounts the file into the **runtime container** at the requested standard Quarkus path:
 
 ```text
-deploy/backend/application.properties
+deploy/server/application.properties
         -> /opt/app/config/application.properties
 ```
 
@@ -77,8 +77,8 @@ From the repository root:
 
 ```bash
 cp .env.example .env
-mkdir -p quarkus-gatelink-server/runtime/logs
-mkdir -p quarkus-gatelink-server/runtime/tmp
+mkdir -p quarkus-gatelink-webpush-server/runtime/logs
+mkdir -p quarkus-gatelink-webpush-server/runtime/tmp
 ```
 
 The Quarkus image runs as the explicit identity:
@@ -91,16 +91,16 @@ GID 10001
 The bind-mounted runtime directories must therefore be writable by `10001:10001`:
 
 ```bash
-sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/logs
-sudo chown -R 10001:10001 quarkus-gatelink-server/runtime/tmp
-sudo chmod 0750 quarkus-gatelink-server/runtime/logs
-sudo chmod 0750 quarkus-gatelink-server/runtime/tmp
+sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/logs
+sudo chown -R 10001:10001 quarkus-gatelink-webpush-server/runtime/tmp
+sudo chmod 0750 quarkus-gatelink-webpush-server/runtime/logs
+sudo chmod 0750 quarkus-gatelink-webpush-server/runtime/tmp
 ```
 
 The external Quarkus configuration only needs to be readable by the container:
 
 ```bash
-chmod 0644 deploy/backend/application.properties
+chmod 0644 deploy/server/application.properties
 ```
 
 Do not put production secrets directly in that properties file. Database password, VAPID keys and OIDC values are supplied through environment variables.
@@ -325,7 +325,7 @@ Angular Service Worker bootstrap/manifest files are explicitly marked `no-cache`
 The host/source file:
 
 ```text
-./deploy/backend/application.properties
+./deploy/server/application.properties
 ```
 
 is mounted read-only as:
@@ -396,7 +396,7 @@ docker compose logs -f backend
 View the persistent file:
 
 ```bash
-tail -f quarkus-gatelink-server/runtime/logs/application.log
+tail -f quarkus-gatelink-webpush-server/runtime/logs/application.log
 ```
 
 Current file rotation:
@@ -412,7 +412,7 @@ rotated suffix:    date + .gz compression
 The host directory:
 
 ```text
-./quarkus-gatelink-server/runtime/tmp
+./quarkus-gatelink-webpush-server/runtime/tmp
 ```
 
 is mounted as:
@@ -520,7 +520,7 @@ docker compose ps backend
 docker compose logs -f backend
 ```
 
-If `deploy/backend/application.properties` changes but code does not, an image rebuild is unnecessary:
+If `deploy/server/application.properties` changes but code does not, an image rebuild is unnecessary:
 
 ```bash
 docker compose restart backend
@@ -582,7 +582,7 @@ When shell variables are not exported, `docker compose exec postgres` can instea
 | PostgreSQL subscriptions | Docker named volume `postgres_data` | yes |
 | Quarkus application log files | host bind mount `runtime/logs` | yes |
 | Quarkus temporary files | host bind mount `runtime/tmp` | yes, intentionally |
-| external Quarkus config | host file `deploy/backend/application.properties`, mounted read-only | yes |
+| external Quarkus config | host file `deploy/server/application.properties`, mounted read-only | yes |
 | Quarkus JAR | image | rebuilt/replaced with image |
 | Angular application | frontend image | rebuilt/replaced with image |
 | VAPID identity | environment/secret source | must remain stable in production |
@@ -595,7 +595,7 @@ Before deployment verify:
 - `postgres`, `backend`, and `frontend` service names match internal hostnames;
 - JDBC uses `postgres:5432`, not `localhost`;
 - Nginx uses `backend:8080`, not `localhost`;
-- `deploy/backend/application.properties` is mounted read-only at `/opt/app/config/application.properties`;
+- `deploy/server/application.properties` is mounted read-only at `/opt/app/config/application.properties`;
 - UID/GID `10001:10001` can write `runtime/logs` and `runtime/tmp`;
 - PostgreSQL uses `postgres_data` and is not published on the host;
 - `/dashboard` and `/settings` refresh to Angular rather than returning Nginx 404;
@@ -604,3 +604,26 @@ Before deployment verify:
 - OIDC is enabled/configured before administrative endpoints are exposed;
 - no secrets are baked into Docker images;
 - production browser traffic uses HTTPS.
+
+## TLS and fixed Docker identities
+
+GateLink uses fixed service/container/hostname values `quarkus-gatelink-webpush-ui` and `quarkus-gatelink-webpush-server`.
+
+```text
+Browser -- HTTPS :443 --> quarkus-gatelink-webpush-ui
+                            |
+                            | HTTPS :8443 via Docker DNS
+                            v
+                      quarkus-gatelink-webpush-server
+```
+
+UI HTTP `:80` redirects to HTTPS. Quarkus deliberately keeps both `:8080` HTTP and `:8443` HTTPS published for direct REST/operations access. Both application containers generate persistent self-signed PEM certificate/key pairs on first start; no private TLS key is committed to Git.
+
+Because the Quarkus certificate is self-signed, Nginx encrypts the internal `/api/` hop but uses `proxy_ssl_verify off`. A deployment with an internal CA should replace this with CA verification. Do not enable HSTS while operators are still using an untrusted self-signed UI certificate.
+
+```bash
+curl -k https://localhost/healthz
+curl -k https://localhost/api/q/health/ready
+curl http://localhost:8080/q/health/ready
+curl -k https://localhost:8443/q/health/ready
+```

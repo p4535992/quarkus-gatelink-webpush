@@ -271,3 +271,9 @@ Never put these in Angular source, runtime config downloaded by the browser, or 
 - other users' stored PushSubscription secrets.
 
 The browser only needs the public VAPID key returned by GateLink.
+
+## HTTPS runtime
+
+The UI service/container/hostname is `quarkus-gatelink-webpush-ui`. Nginx listens on `443` for normal user traffic and keeps port `80` for redirect plus the local health endpoint. A self-signed certificate is generated on first start and persisted at `/etc/nginx/tls`.
+
+`/api/` is proxied to `https://quarkus-gatelink-webpush-server:8443/` using Docker DNS; the browser never needs the internal server hostname.

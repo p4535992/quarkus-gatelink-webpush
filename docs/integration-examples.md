@@ -7,7 +7,7 @@ Java service / TypeScript app
           |
           | HTTP
           v
-quarkus-gatelink-server
+quarkus-gatelink-webpush-server
           |
           +---- PostgreSQL subscriptions
           |
@@ -162,7 +162,7 @@ public class NotificationGateway {
 }
 ```
 
-The GateLink repository uses the same MicroProfile REST Client approach in `quarkus-gatelink-server/src/test/java/com/quarkus/gatelink/system/` for HTTP-level tests.
+The GateLink repository uses the same MicroProfile REST Client approach in `quarkus-gatelink-webpush-server/src/test/java/com/quarkus/gatelink/system/` for HTTP-level tests.
 
 ## TypeScript: standard `fetch`
 
@@ -286,7 +286,7 @@ Start PostgreSQL and GateLink:
 
 ```bash
 docker compose up -d postgres
-cd quarkus-gatelink-server
+cd quarkus-gatelink-webpush-server
 mvn quarkus:dev
 ```
 

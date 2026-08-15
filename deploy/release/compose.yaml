@@ -16,16 +16,16 @@ services:
       start_period: 10s
     volumes:
       - postgres_data:/var/lib/postgresql
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
-  backend:
+  quarkus-gatelink-webpush-server:
+    container_name: quarkus-gatelink-webpush-server
+    hostname: quarkus-gatelink-webpush-server
     build:
-      context: ./backend
+      context: ./server
       dockerfile: Dockerfile
-    image: quarkus-gatelink-backend:${GATELINK_VERSION:-release}
+    image: quarkus-gatelink-webpush-server:${GATELINK_VERSION:-release}
     restart: unless-stopped
     stop_grace_period: 30s
     user: "10001:10001"
@@ -43,49 +43,61 @@ services:
       WEBPUSH_VAPID_PRIVATE_KEY: ${WEBPUSH_VAPID_PRIVATE_KEY:-}
       WEBPUSH_VAPID_SUBJECT: ${WEBPUSH_VAPID_SUBJECT:-mailto:admin@example.com}
       OTEL_EXPORT_ENABLED: ${OTEL_EXPORT_ENABLED:-false}
+      GATELINK_TLS_COMMON_NAME: ${SERVER_TLS_COMMON_NAME:-quarkus-gatelink-webpush-server}
+      GATELINK_TLS_SAN: ${SERVER_TLS_SAN:-DNS:quarkus-gatelink-webpush-server,DNS:localhost,IP:127.0.0.1}
+      GATELINK_TLS_DAYS: ${TLS_DAYS:-825}
     volumes:
-      - ./backend/application.properties:/opt/app/config/application.properties:ro
-      - backend_logs:/opt/app/logs
-      - backend_tmp:/opt/app/tmp
-    expose:
-      - "8080"
+      - ./server/application.properties:/opt/app/config/application.properties:ro
+      - server_logs:/opt/app/logs
+      - server_tmp:/opt/app/tmp
+      - server_tls:/opt/app/tls
+    ports:
+      - "8080:8080"
+      - "8443:8443"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/q/health/ready"]
+      test: ["CMD", "curl", "--fail", "--insecure", "--silent", "--show-error", "https://127.0.0.1:8443/q/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 20s
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
-  frontend:
+  quarkus-gatelink-webpush-ui:
+    container_name: quarkus-gatelink-webpush-ui
+    hostname: quarkus-gatelink-webpush-ui
     build:
-      context: ./frontend
+      context: ./ui
       dockerfile: Dockerfile
-    image: quarkus-gatelink-frontend:${GATELINK_VERSION:-release}
+    image: quarkus-gatelink-webpush-ui:${GATELINK_VERSION:-release}
     restart: unless-stopped
     depends_on:
-      backend:
+      quarkus-gatelink-webpush-server:
         condition: service_healthy
+    environment:
+      GATELINK_TLS_COMMON_NAME: ${UI_TLS_COMMON_NAME:-quarkus-gatelink-webpush-ui}
+      GATELINK_TLS_SAN: ${UI_TLS_SAN:-DNS:quarkus-gatelink-webpush-ui,DNS:localhost,IP:127.0.0.1}
+      GATELINK_TLS_DAYS: ${TLS_DAYS:-825}
     ports:
-      - "${FRONTEND_PORT:-8081}:80"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ui_tls:/etc/nginx/tls
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 6
       start_period: 5s
-    networks:
-      - gatelink
-    security_opt:
-      - no-new-privileges:true
+    networks: [gatelink]
+    security_opt: [no-new-privileges:true]
 
 volumes:
   postgres_data:
-  backend_logs:
-  backend_tmp:
+  server_logs:
+  server_tmp:
+  server_tls:
+  ui_tls:
 
 networks:
   gatelink:

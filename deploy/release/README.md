@@ -1,84 +1,53 @@
 # GateLink @VERSION@ - Docker Compose bundle
 
-This archive contains prebuilt GateLink application artifacts plus small runtime-only Dockerfiles. Maven and Node.js are **not** required on the target host.
+This archive contains the prebuilt Quarkus server and Angular UI. Maven and Node.js are not required on the target host.
 
-## Included
-
-```text
-compose.yaml
-.env.example
-backend/
-  app.jar
-  application.properties
-  Dockerfile
-frontend/
-  dist/
-  nginx.conf
-  Dockerfile
-```
-
-The stack contains:
+## Runtime contract
 
 ```text
-Browser :8081 -> Nginx/Angular -> Quarkus :8080 -> PostgreSQL :5432
+Browser/operator
+      |
+      | HTTPS 443 (normal user entry)
+      v
+quarkus-gatelink-webpush-ui
+      |
+      | HTTPS 8443, Docker DNS
+      v
+quarkus-gatelink-webpush-server
+      |
+      v
+postgres
 ```
 
-Only the frontend port is published on the host.
+Fixed service/container/hostname values are `quarkus-gatelink-webpush-ui` and `quarkus-gatelink-webpush-server`.
+
+Published ports:
+
+- UI HTTP `80` redirects to HTTPS;
+- UI HTTPS `443` is the normal user entry point;
+- Quarkus HTTP `8080` remains available for direct REST/operations access;
+- Quarkus HTTPS `8443` remains available for direct REST/operations access.
 
 ## Start
 
-1. Copy the example environment file:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Edit `.env` before production use. At minimum change `POSTGRES_PASSWORD` and configure a stable VAPID key pair. Enable/configure OIDC when administrative endpoints must be protected by the external identity provider.
-
-3. Build the two small runtime images and start the stack:
-
-   ```bash
-   docker compose up -d --build --wait
-   ```
-
-4. Verify it:
-
-   ```bash
-   curl --fail http://127.0.0.1:8081/healthz
-   curl --fail http://127.0.0.1:8081/api/q/health/ready
-   docker compose ps
-   ```
-
-Open `http://127.0.0.1:8081/` in a browser.
-
-## Operations
-
-View logs:
-
 ```bash
-docker compose logs -f
-```
-
-Stop without deleting PostgreSQL data:
-
-```bash
-docker compose down
-```
-
-Stop and delete all named volumes, including PostgreSQL data:
-
-```bash
-docker compose down -v
-```
-
-The bundle uses named volumes for PostgreSQL data, Quarkus file logs and Quarkus temporary storage. This avoids host UID/GID preparation while the backend itself still runs as non-root UID/GID `10001:10001`.
-
-## Upgrade
-
-For a later GateLink release, extract the new bundle, copy/adapt your `.env`, then run:
-
-```bash
+cp .env.example .env
+# edit secrets and TLS SAN values if the host is not localhost
 docker compose up -d --build --wait
 ```
 
-Keep a PostgreSQL backup before production upgrades.
+Self-signed certificates are generated automatically on first start and persisted in Docker volumes. Browsers/clients must explicitly trust or accept them.
+
+Verify:
+
+```bash
+curl -k https://127.0.0.1/healthz
+curl -k https://127.0.0.1/api/q/health/ready
+curl http://127.0.0.1:8080/q/health/ready
+curl -k https://127.0.0.1:8443/q/health/ready
+docker compose ps
+```
+
+Nginx proxies `/api/` to `https://quarkus-gatelink-webpush-server:8443/` on the private Compose network.
+
+`docker compose down` preserves PostgreSQL data and generated TLS material. Do not use `docker compose down -v` unless all named-volume data should be deleted.

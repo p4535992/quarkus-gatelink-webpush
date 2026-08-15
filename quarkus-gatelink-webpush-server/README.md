@@ -1,4 +1,4 @@
-# `quarkus-gatelink-server`
+# `quarkus-gatelink-webpush-server`
 
 This is the Java 21 / Quarkus backend. It contains production code and all Java tests.
 
@@ -93,7 +93,7 @@ java -jar /opt/app/app.jar
 The source file is intentionally outside this Maven module:
 
 ```text
-../deploy/backend/application.properties
+../deploy/server/application.properties
 ```
 
 Compose mounts it as:
@@ -108,7 +108,7 @@ Because the container uses `WORKDIR /opt/app`, Quarkus loads it from the standar
 $PWD/config/application.properties
 ```
 
-Keeping the source copy outside `quarkus-gatelink-server/config/` is deliberate. A module-local `config/application.properties` would also be visible to ordinary Maven/dev/test executions and could leak Docker-only settings such as hostname `postgres` into tests.
+Keeping the source copy outside `quarkus-gatelink-webpush-server/config/` is deliberate. A module-local `config/application.properties` would also be visible to ordinary Maven/dev/test executions and could leak Docker-only settings such as hostname `postgres` into tests.
 
 The file is mounted read-only. Secrets remain environment variables.
 
@@ -305,7 +305,7 @@ GateLink additionally writes:
 through the host bind mount:
 
 ```text
-quarkus-gatelink-server/runtime/logs/
+quarkus-gatelink-webpush-server/runtime/logs/
 ```
 
 File rotation is configured for:
@@ -327,7 +327,7 @@ rotation:      date-suffixed, compressed .gz
 bound to:
 
 ```text
-quarkus-gatelink-server/runtime/tmp/
+quarkus-gatelink-webpush-server/runtime/tmp/
 ```
 
 Both runtime directories must be writable on the host by `10001:10001`.
@@ -386,7 +386,7 @@ docker compose up -d postgres
 Then:
 
 ```bash
-cd quarkus-gatelink-server
+cd quarkus-gatelink-webpush-server
 mvn clean verify
 ```
 
@@ -401,8 +401,14 @@ CI runs the Java test suite, validates the resolved Compose model and builds bot
 ## Local development
 
 ```bash
-cd quarkus-gatelink-server
+cd quarkus-gatelink-webpush-server
 mvn quarkus:dev
 ```
 
-Local Maven/dev/test uses `src/main/resources/application.properties`; it does not load the Docker runtime file from `deploy/backend/`.
+Local Maven/dev/test uses `src/main/resources/application.properties`; it does not load the Docker runtime file from `deploy/server/`.
+
+## Container HTTP/HTTPS contract
+
+The server service/container/hostname is `quarkus-gatelink-webpush-server`. It listens on HTTP `8080` and HTTPS `8443` simultaneously. The container entrypoint creates `/opt/app/tls/tls.crt` and `/opt/app/tls/tls.key` on first start when they are absent.
+
+UI traffic arrives through Nginx over `https://quarkus-gatelink-webpush-server:8443/`. Direct operator calls may use `http://localhost:8080` or `https://localhost:8443`.
