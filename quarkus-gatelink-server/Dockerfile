@@ -1,0 +1,39 @@
+FROM maven:3.9.13-eclipse-temurin-21-noble AS build
+
+WORKDIR /build
+
+COPY pom.xml ./
+RUN mvn -B -DskipTests dependency:go-offline
+
+COPY src ./src
+# Keep normal Maven/test packaging unchanged. The Docker artifact alone is
+# produced as an uber-JAR and named app-runner.jar.
+RUN mvn -B -DskipTests \
+    -Dquarkus.package.jar.type=uber-jar \
+    -Dquarkus.package.output-name=app \
+    package
+
+FROM eclipse-temurin:21-jre-noble
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+ENV JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/opt/app/tmp -Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${APP_GID}" gatelink \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --home-dir /opt/app --no-create-home --shell /usr/sbin/nologin gatelink \
+    && mkdir -p /opt/app/config /opt/app/logs /opt/app/tmp \
+    && chown -R "${APP_UID}:${APP_GID}" /opt/app
+
+WORKDIR /opt/app
+
+COPY --from=build --chown=${APP_UID}:${APP_GID} /build/target/app-runner.jar /opt/app/app.jar
+
+EXPOSE 8080
+
+USER ${APP_UID}:${APP_GID}
+
+ENTRYPOINT ["java", "-jar", "/opt/app/app.jar"]

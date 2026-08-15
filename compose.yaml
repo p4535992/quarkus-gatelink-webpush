@@ -1,0 +1,90 @@
+name: quarkus-gatelink-webpush
+
+services:
+  postgres:
+    image: postgres:18.4-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gatelink}
+      POSTGRES_USER: ${POSTGRES_USER:-gatelink}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-production}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - gatelink
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build:
+      context: ./quarkus-gatelink-server
+      dockerfile: Dockerfile
+    image: quarkus-gatelink-backend:${GATELINK_VERSION:-local}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    user: "10001:10001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_NAME: ${POSTGRES_DB:-gatelink}
+      DB_USER: ${POSTGRES_USER:-gatelink}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-production}
+      OIDC_ENABLED: ${OIDC_ENABLED:-false}
+      OIDC_AUTH_SERVER_URL: ${OIDC_AUTH_SERVER_URL:-https://id.example.invalid/realms/gatelink}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-gatelink-server}
+      WEBPUSH_VAPID_PUBLIC_KEY: ${WEBPUSH_VAPID_PUBLIC_KEY:-}
+      WEBPUSH_VAPID_PRIVATE_KEY: ${WEBPUSH_VAPID_PRIVATE_KEY:-}
+      WEBPUSH_VAPID_SUBJECT: ${WEBPUSH_VAPID_SUBJECT:-mailto:admin@example.com}
+      OTEL_EXPORT_ENABLED: ${OTEL_EXPORT_ENABLED:-false}
+    volumes:
+      - ./deploy/backend/application.properties:/opt/app/config/application.properties:ro
+      - ./quarkus-gatelink-server/runtime/logs:/opt/app/logs
+      - ./quarkus-gatelink-server/runtime/tmp:/opt/app/tmp
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/q/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - gatelink
+    security_opt:
+      - no-new-privileges:true
+
+  frontend:
+    build:
+      context: ./quarkus-gatelink-webpush-ui
+      dockerfile: Dockerfile
+    image: quarkus-gatelink-frontend:${GATELINK_VERSION:-local}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks:
+      - gatelink
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+
+networks:
+  gatelink:
+    driver: bridge
