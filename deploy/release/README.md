@@ -1,6 +1,13 @@
 # GateLink @VERSION@ - Docker Compose bundle
 
-This archive contains the prebuilt Quarkus server and Angular UI. Maven and Node.js are not required on the target host.
+This archive is published as:
+
+```text
+quarkus-gatelink-webpush-compose-@VERSION@.zip
+quarkus-gatelink-webpush-compose-@VERSION@.tar.gz
+```
+
+The archive root directory is `quarkus-gatelink-webpush-compose-@VERSION@` and contains the prebuilt Quarkus server and Angular UI. Maven and Node.js are not required on the target host.
 
 ## Runtime contract
 
