@@ -23,7 +23,7 @@ PostgreSQL 18
 
 The stack uses **Docker and Docker Compose**, not Podman. Container-to-container communication always uses Compose service names; no Docker IP addresses are hardcoded.
 
-The backend also makes outbound HTTPS requests to browser Push Services (FCM, Mozilla/vendor services), and production administrative calls can use an external OIDC provider. The dedicated Compose bridge network is therefore private to the stack for inbound service discovery, but it is intentionally **not** declared `internal: true`, because GateLink needs outbound network access.
+The backend also makes outbound HTTPS requests to browser Push Services (FCM, Mozilla/vendor services), and production administrative calls can use an external OIDC provider. The dedicated Compose bridge network is therefore private to the stack for service discovery, but it is intentionally **not** declared `internal: true`, because GateLink needs outbound network access.
 
 ## 1. Final repository layout
 
@@ -33,12 +33,14 @@ quarkus-gatelink-webpush/
 ├── .env.example
 ├── .gitignore
 │
+├── deploy/
+│   └── backend/
+│       └── application.properties
+│
 ├── quarkus-gatelink-server/
 │   ├── Dockerfile
 │   ├── .dockerignore
 │   ├── pom.xml
-│   ├── config/
-│   │   └── application.properties
 │   ├── runtime/
 │   │   ├── logs/
 │   │   │   └── .gitkeep
@@ -56,6 +58,15 @@ quarkus-gatelink-webpush/
     ├── tsconfig.app.json
     ├── ngsw-config.json
     └── src/
+```
+
+The container configuration source deliberately lives in `deploy/backend/`, outside the Quarkus module. Quarkus treats `$PWD/config/application.properties` as external configuration; keeping Docker-only settings under `quarkus-gatelink-server/config/` would therefore risk loading `postgres` and container environment placeholders during ordinary Maven/dev/test runs.
+
+Compose mounts the file into the **runtime container** at the requested standard Quarkus path:
+
+```text
+deploy/backend/application.properties
+        -> /opt/app/config/application.properties
 ```
 
 Source code and application binaries are baked into images. Production does **not** bind-mount Java source, the Quarkus JAR, Angular source or Angular build output.
@@ -89,7 +100,7 @@ sudo chmod 0750 quarkus-gatelink-server/runtime/tmp
 The external Quarkus configuration only needs to be readable by the container:
 
 ```bash
-chmod 0644 quarkus-gatelink-server/config/application.properties
+chmod 0644 deploy/backend/application.properties
 ```
 
 Do not put production secrets directly in that properties file. Database password, VAPID keys and OIDC values are supplied through environment variables.
@@ -139,6 +150,8 @@ The backend Dockerfile is multi-stage:
 maven:3.9.13-eclipse-temurin-21-noble
         |
         | mvn package
+        | -Dquarkus.package.jar.type=uber-jar
+        | -Dquarkus.package.output-name=app
         v
 app-runner.jar
         |
@@ -149,7 +162,7 @@ eclipse-temurin:21-jre-noble
 /opt/app/app.jar
 ```
 
-The Maven project is configured as a Quarkus `uber-jar`, with final artifact name `app`. The runtime image contains only the built application and JRE, not Maven or Java source.
+Only the Docker build requests Quarkus uber-JAR packaging. Normal Maven test/dev packaging remains unchanged. The runtime image contains only the built application and JRE, not Maven or Java source.
 
 The Java process starts exactly as:
 
@@ -223,7 +236,7 @@ The backend and PostgreSQL are intentionally **not** published on host ports.
 
 ## 6. Service networking
 
-Compose creates a dedicated bridge network named from the stack and network key `gatelink`.
+Compose creates a dedicated bridge network using the network key `gatelink`.
 
 Service DNS names are:
 
@@ -305,12 +318,14 @@ location / {
 
 The `/api/` location is more specific and is evaluated separately, so API requests never fall through to `index.html`.
 
+Angular Service Worker bootstrap/manifest files are explicitly marked `no-cache`; hashed Angular application assets can be cached aggressively.
+
 ## 9. External Quarkus configuration
 
-The host file:
+The host/source file:
 
 ```text
-./quarkus-gatelink-server/config/application.properties
+./deploy/backend/application.properties
 ```
 
 is mounted read-only as:
@@ -325,13 +340,15 @@ The image uses:
 WORKDIR /opt/app
 ```
 
-so Quarkus sees the file at its standard external location:
+so Quarkus sees the mounted file at its standard external location:
 
 ```text
 $PWD/config/application.properties
 ```
 
 This external file overrides corresponding configuration packaged in the JAR. Changing runtime configuration therefore does not require rebuilding the backend image; restart the backend container after changing values.
+
+Keeping the source copy outside the Maven module is important: it separates Docker runtime configuration from local/test configuration and prevents Docker-only service names from leaking into `mvn test` or `mvn quarkus:dev`.
 
 ## 10. PostgreSQL
 
@@ -501,7 +518,7 @@ docker compose ps backend
 docker compose logs -f backend
 ```
 
-If the external `application.properties` changes but code does not, an image rebuild is unnecessary:
+If `deploy/backend/application.properties` changes but code does not, an image rebuild is unnecessary:
 
 ```bash
 docker compose restart backend
@@ -563,7 +580,7 @@ When shell variables are not exported, `docker compose exec postgres` can instea
 | PostgreSQL subscriptions | Docker named volume `postgres_data` | yes |
 | Quarkus application log files | host bind mount `runtime/logs` | yes |
 | Quarkus temporary files | host bind mount `runtime/tmp` | yes, intentionally |
-| external Quarkus config | host bind mount `config/application.properties` | yes |
+| external Quarkus config | host file `deploy/backend/application.properties`, mounted read-only | yes |
 | Quarkus JAR | image | rebuilt/replaced with image |
 | Angular application | frontend image | rebuilt/replaced with image |
 | VAPID identity | environment/secret source | must remain stable in production |
@@ -576,7 +593,7 @@ Before deployment verify:
 - `postgres`, `backend`, and `frontend` service names match internal hostnames;
 - JDBC uses `postgres:5432`, not `localhost`;
 - Nginx uses `backend:8080`, not `localhost`;
-- backend config is mounted read-only;
+- `deploy/backend/application.properties` is mounted read-only at `/opt/app/config/application.properties`;
 - UID/GID `10001:10001` can write `runtime/logs` and `runtime/tmp`;
 - PostgreSQL uses `postgres_data` and is not published on the host;
 - `/dashboard` and `/settings` refresh to Angular rather than returning Nginx 404;
