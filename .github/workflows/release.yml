@@ -14,10 +14,14 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'deploy/release/**'
-      - 'deploy/backend/application.properties'
+      - 'deploy/server/application.properties'
       - '.env.example'
-      - 'quarkus-gatelink-server/Dockerfile'
+      - 'compose.yaml'
+      - 'quarkus-gatelink-webpush-server/Dockerfile'
+      - 'quarkus-gatelink-webpush-server/docker-entrypoint.sh'
+      - 'quarkus-gatelink-webpush-server/pom.xml'
       - 'quarkus-gatelink-webpush-ui/Dockerfile'
+      - 'quarkus-gatelink-webpush-ui/docker-entrypoint.sh'
       - 'quarkus-gatelink-webpush-ui/nginx.conf'
       - 'quarkus-gatelink-webpush-ui/angular.json'
       - 'quarkus-gatelink-webpush-ui/package.json'
@@ -87,14 +91,14 @@ jobs:
           node-version: '24.18.0'
 
       - name: Verify Quarkus project
-        run: mvn -B -f quarkus-gatelink-server/pom.xml clean verify
+        run: mvn -B -f quarkus-gatelink-webpush-server/pom.xml clean verify
 
       - name: Build Quarkus uber-JAR
         run: >-
-          mvn -B -f quarkus-gatelink-server/pom.xml
+          mvn -B -f quarkus-gatelink-webpush-server/pom.xml
           -DskipTests
           -Dquarkus.package.jar.type=uber-jar
-          -Dquarkus.package.output-name=gatelink-server
+          -Dquarkus.package.output-name=quarkus-gatelink-webpush-server
           package
 
       - name: Build Angular production application
@@ -111,25 +115,28 @@ jobs:
           VERSION='${{ steps.meta.outputs.version }}'
           OUT="${GITHUB_WORKSPACE}/release-out"
           STAGE="${GITHUB_WORKSPACE}/release-stage"
+          SERVER_NAME="quarkus-gatelink-webpush-server-${VERSION}"
           UI_NAME="gatelink-webpush-ui-${VERSION}"
           COMPOSE_NAME="gatelink-compose-${VERSION}"
           UI_DIR="${STAGE}/${UI_NAME}"
           BUNDLE="${STAGE}/${COMPOSE_NAME}"
 
-          mkdir -p "${OUT}" "${UI_DIR}" "${BUNDLE}/backend" "${BUNDLE}/frontend/dist"
+          mkdir -p "${OUT}" "${UI_DIR}" "${BUNDLE}/server" "${BUNDLE}/ui/dist"
 
-          cp quarkus-gatelink-server/target/gatelink-server-runner.jar \
-            "${OUT}/gatelink-server-${VERSION}.jar"
+          cp quarkus-gatelink-webpush-server/target/quarkus-gatelink-webpush-server-runner.jar \
+            "${OUT}/${SERVER_NAME}.jar"
 
           cp -a quarkus-gatelink-webpush-ui/dist/gatelink-webpush-ui/browser/. "${UI_DIR}/"
 
-          cp "${OUT}/gatelink-server-${VERSION}.jar" "${BUNDLE}/backend/app.jar"
-          cp deploy/backend/application.properties "${BUNDLE}/backend/application.properties"
-          cp deploy/release/backend.Dockerfile "${BUNDLE}/backend/Dockerfile"
+          cp "${OUT}/${SERVER_NAME}.jar" "${BUNDLE}/server/app.jar"
+          cp deploy/server/application.properties "${BUNDLE}/server/application.properties"
+          cp deploy/release/server.Dockerfile "${BUNDLE}/server/Dockerfile"
+          cp quarkus-gatelink-webpush-server/docker-entrypoint.sh "${BUNDLE}/server/docker-entrypoint.sh"
 
-          cp -a quarkus-gatelink-webpush-ui/dist/gatelink-webpush-ui/browser/. "${BUNDLE}/frontend/dist/"
-          cp quarkus-gatelink-webpush-ui/nginx.conf "${BUNDLE}/frontend/nginx.conf"
-          cp deploy/release/frontend.Dockerfile "${BUNDLE}/frontend/Dockerfile"
+          cp -a quarkus-gatelink-webpush-ui/dist/gatelink-webpush-ui/browser/. "${BUNDLE}/ui/dist/"
+          cp quarkus-gatelink-webpush-ui/nginx.conf "${BUNDLE}/ui/nginx.conf"
+          cp deploy/release/ui.Dockerfile "${BUNDLE}/ui/Dockerfile"
+          cp quarkus-gatelink-webpush-ui/docker-entrypoint.sh "${BUNDLE}/ui/docker-entrypoint.sh"
 
           cp deploy/release/compose.yaml "${BUNDLE}/compose.yaml"
           sed "s/^GATELINK_VERSION=.*/GATELINK_VERSION=${VERSION}/" .env.example > "${BUNDLE}/.env.example"
@@ -145,15 +152,33 @@ jobs:
           VERSION='${{ steps.meta.outputs.version }}'
           BUNDLE="${GITHUB_WORKSPACE}/release-stage/gatelink-compose-${VERSION}"
 
-          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" build backend frontend
-          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" up -d --no-build --wait --wait-timeout 120
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" build \
+            quarkus-gatelink-webpush-server quarkus-gatelink-webpush-ui
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" \
+            up -d --no-build --wait --wait-timeout 120
 
-          curl --fail --silent --show-error http://127.0.0.1:8081/healthz
-          curl --fail --silent --show-error http://127.0.0.1:8081/api/q/health/ready
-          curl --fail --silent --show-error http://127.0.0.1:8081/dashboard | grep -q '<app-root'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1/)" = "308"
+          curl --fail --insecure --silent --show-error https://127.0.0.1/healthz
+          curl --fail --insecure --silent --show-error https://127.0.0.1/api/q/health/ready
+          curl --fail --insecure --silent --show-error https://127.0.0.1/dashboard | grep -q '<app-root'
+          curl --fail --silent --show-error http://127.0.0.1:8080/q/health/ready
+          curl --fail --insecure --silent --show-error https://127.0.0.1:8443/q/health/ready
 
-          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" exec -T backend \
-            sh -c 'test "$(id -u)" = "10001" && test -w /opt/app/logs && test -w /opt/app/tmp'
+          test "$(docker inspect -f '{{.Name}}' quarkus-gatelink-webpush-server)" = '/quarkus-gatelink-webpush-server'
+          test "$(docker inspect -f '{{.Config.Hostname}}' quarkus-gatelink-webpush-server)" = 'quarkus-gatelink-webpush-server'
+          test "$(docker inspect -f '{{.Name}}' quarkus-gatelink-webpush-ui)" = '/quarkus-gatelink-webpush-ui'
+          test "$(docker inspect -f '{{.Config.Hostname}}' quarkus-gatelink-webpush-ui)" = 'quarkus-gatelink-webpush-ui'
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" \
+            exec -T quarkus-gatelink-webpush-ui getent hosts quarkus-gatelink-webpush-server
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" \
+            exec -T quarkus-gatelink-webpush-server \
+            sh -c 'test "$(id -u)" = "10001" && test -w /opt/app/logs && test -w /opt/app/tmp && test -s /opt/app/tls/tls.crt && test -s /opt/app/tls/tls.key'
+
+          docker compose --env-file "${BUNDLE}/.env.example" -f "${BUNDLE}/compose.yaml" \
+            exec -T quarkus-gatelink-webpush-ui \
+            sh -c 'test -s /etc/nginx/tls/tls.crt && test -s /etc/nginx/tls/tls.key'
 
       - name: Print release Compose diagnostics on failure
         if: failure()
@@ -184,6 +209,7 @@ jobs:
           VERSION='${{ steps.meta.outputs.version }}'
           OUT="${GITHUB_WORKSPACE}/release-out"
           STAGE="${GITHUB_WORKSPACE}/release-stage"
+          SERVER_NAME="quarkus-gatelink-webpush-server-${VERSION}"
           UI_NAME="gatelink-webpush-ui-${VERSION}"
           COMPOSE_NAME="gatelink-compose-${VERSION}"
 
@@ -198,7 +224,7 @@ jobs:
           (
             cd "${OUT}"
             sha256sum \
-              "gatelink-server-${VERSION}.jar" \
+              "${SERVER_NAME}.jar" \
               "${UI_NAME}.zip" \
               "${UI_NAME}.tar.gz" \
               "${COMPOSE_NAME}.zip" \
@@ -234,10 +260,10 @@ jobs:
             echo 'Version: `${{ steps.meta.outputs.version }}`'
             echo
             echo 'Generated:'
-            echo '- Quarkus uber-JAR'
+            echo '- Quarkus webpush server uber-JAR'
             echo '- Angular production ZIP'
             echo '- Angular production TAR.GZ'
-            echo '- ready-to-run Docker Compose ZIP'
-            echo '- ready-to-run Docker Compose TAR.GZ'
+            echo '- HTTPS-ready Docker Compose ZIP'
+            echo '- HTTPS-ready Docker Compose TAR.GZ'
             echo '- SHA256SUMS'
           } >> "${GITHUB_STEP_SUMMARY}"
